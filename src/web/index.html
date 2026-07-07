@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLaVA Demo</title>
+  <style>
+    body {
+      margin: 0;
+      background: #0e0f12;
+      color: #d6d8de;
+      font-family: -apple-system, "Helvetica Neue", "Hiragino Sans", system-ui, sans-serif;
+    }
+    .wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px;
+      gap: 8px;
+    }
+    .stage {
+      position: relative;
+      width: 100%;
+      max-width: 1280px;
+      aspect-ratio: 16 / 9;
+      background: #000;
+      border: 1px solid #2a2c33;
+    }
+    .stage img,
+    .stage canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .stage img {
+      object-fit: contain;
+    }
+    .stage canvas {
+      pointer-events: none;
+    }
+    .status-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      font-size: 13px;
+      opacity: 0.75;
+      font-variant-numeric: tabular-nums;
+    }
+    .status.error { color: #f08; opacity: 1; }
+    .status.ok    { color: #6f8; opacity: 1; }
+    .caption {
+      width: 100%;
+      max-width: 1280px;
+      box-sizing: border-box;
+      background: rgba(20, 24, 32, 0.85);
+      border: 1px solid #2a2c33;
+      border-radius: 6px;
+      padding: 14px 18px;
+      font-size: 34px;
+      line-height: 1.55;
+      min-height: 56px;
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
+      word-break: break-word;
+      transition: opacity 120ms linear;
+    }
+    .caption.fading { opacity: 0.25; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="stage">
+      <img id="stream" src="/stream.mjpg" alt="">
+      <canvas id="overlay"></canvas>
+    </div>
+    <div class="status-row">
+      <span class="status" id="status">connecting…</span>
+      <span class="status" id="ws-status">bbox: idle</span>
+      <span class="status" id="caption-status">caption: idle</span>
+    </div>
+    <div class="caption" id="caption">(no caption yet)</div>
+  </div>
+
+  <script>
+    // Plain MJPEG over multipart/x-mixed-replace. The browser keeps the
+    // connection open and swaps in each new JPEG frame automatically — no
+    // WebRTC / ICE / UDP, so this works offline.
+    const $img = document.getElementById('stream');
+    const $status = document.getElementById('status');
+    const setStatus = (msg, cls = '') => {
+      $status.textContent = msg;
+      $status.className = 'status' + (cls ? ' ' + cls : '');
+    };
+
+    let reconnectDelay = 500;
+    $img.addEventListener('load', () => {
+      reconnectDelay = 500;
+      setStatus('streaming', 'ok');
+    });
+    $img.addEventListener('error', () => {
+      setStatus('stream error — reconnecting', 'error');
+      setTimeout(() => {
+        // Cache-buster forces a fresh request after the server comes back.
+        $img.src = `/stream.mjpg?t=${Date.now()}`;
+      }, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+    });
+  </script>
+  <script src="/static/overlay.js"></script>
+  <script src="/static/caption.js"></script>
+</body>
+</html>
