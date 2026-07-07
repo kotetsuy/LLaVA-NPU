@@ -12,7 +12,10 @@
 set -euo pipefail
 
 SESSION=llava
-PROJECT_DIR="$HOME/LLaVA"
+# Resolve the repo root from this script's own location so the pipeline always
+# runs against the checkout that contains this start_all.sh (this repo has the
+# NPU sidecar + config.yaml; the older ~/LLaVA does not).
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLAMA_BIN="$HOME/llama.cpp/build/bin/llama-server"
 VLM_MODEL="$HOME/nemotron-3/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf"
 VLM_MMPROJ="$HOME/nemotron-3/mmproj-F16.gguf"
@@ -61,14 +64,14 @@ fi
 
 # Read the YOLO backend + NPU settings from config.yaml (pyyaml is a core dep,
 # so `uv run` always has it). Defaults keep us on the GPU path if parsing fails.
-read -r YOLO_BACKEND NPU_ONNX NPU_PORT < <(
-    cd "$PROJECT_DIR" && uv run python - <<'PY' 2>/dev/null || echo "gpu - -"
+CONFIG_LINE="$(cd "$PROJECT_DIR" && uv run python -c '
 import yaml
 y = yaml.safe_load(open("config.yaml")).get("yolo", {})
 npu = y.get("npu", {})
 print(y.get("backend", "gpu"), npu.get("onnx", "models/yolo11m_a16w8.onnx"), npu.get("port", 8082))
-PY
-)
+' 2>/dev/null)"
+[[ -z "$CONFIG_LINE" ]] && CONFIG_LINE="gpu - -"
+read -r YOLO_BACKEND NPU_ONNX NPU_PORT <<< "$CONFIG_LINE"
 
 if [[ "$YOLO_BACKEND" == "npu" ]]; then
     if [[ ! -f "$RAI_ENV" ]]; then
