@@ -19,8 +19,8 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     exit 0
 fi
 
-echo "sending SIGINT to capture / serve / vlm windows..."
-for win in capture serve vlm; do
+echo "sending SIGINT to capture / serve / vlm / npu-yolo windows..."
+for win in capture serve vlm npu-yolo; do
     if tmux list-windows -t "$SESSION" -F "#{window_name}" 2>/dev/null | grep -qx "$win"; then
         tmux send-keys -t "$SESSION:$win" C-c
     fi
@@ -35,13 +35,13 @@ tmux kill-session -t "$SESSION" 2>/dev/null || true
 # Best-effort: if any of our processes survived (orphaned because the user
 # detached and the session was killed without C-c reaching them), clean up.
 # We deliberately use -INT first; -KILL only if a stragglers list is left.
-pgrep -f "src.server.app|capture.main|llama-server" >/dev/null && {
+pgrep -f "src.server.app|capture.main|llama-server|npu_yolo_sidecar" >/dev/null && {
     echo "post-cleanup: SIGINT to lingering pipeline processes..."
-    pkill -INT -f "src.server.app|capture.main|llama-server" || true
+    pkill -INT -f "src.server.app|capture.main|llama-server|npu_yolo_sidecar" || true
     sleep 2
-    pgrep -f "src.server.app|capture.main|llama-server" >/dev/null && {
+    pgrep -f "src.server.app|capture.main|llama-server|npu_yolo_sidecar" >/dev/null && {
         echo "post-cleanup: SIGKILL holdouts..."
-        pkill -KILL -f "src.server.app|capture.main|llama-server" || true
+        pkill -KILL -f "src.server.app|capture.main|llama-server|npu_yolo_sidecar" || true
     }
 } || true
 

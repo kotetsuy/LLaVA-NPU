@@ -233,6 +233,11 @@ __marimo__/
 *.onnx
 *.safetensors
 
+# VitisAI / NPU compilation cache (regenerated on first inference)
+vaip_cache/
+.vaip*
+*.xclbin
+
 # Claude
 .claude/
 CHANGES.md

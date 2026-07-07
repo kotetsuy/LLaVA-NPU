@@ -1,15 +1,19 @@
 """Background YOLO inference for the WebRTC server.
 
-Runs in a daemon thread inside the FastAPI process: reads the latest frame
-from SHM, runs ``YoloWorker.predict``, and exposes the result via a
-thread-safe ``get_latest()``. The async broadcast loop in ``app.py`` polls
-that slot and pushes JSON to ``/ws/bbox`` clients at the camera FPS.
+Two backends, selected by ``config.yaml`` ``yolo.backend``:
 
-Why a thread, not a separate process: torch/CUDA inference releases the GIL
-during the C++ kernel, so asyncio's event loop in the same process is not
-blocked. Step 5 measured ~8 ms p50 inference at fp16 — well below the
-33 ms 30-fps budget. If we ever see GIL contention with WebRTC encoding,
-the migration path is multiprocessing.Queue between separate procs.
+* ``gpu`` (default) — runs Ultralytics on the GPU *in this process*, in a
+  daemon thread that reads the latest frame from SHM and runs
+  ``YoloWorker.predict``. torch/ROCm inference releases the GIL during the C++
+  kernel, so asyncio's event loop in the same process is not blocked.
+* ``npu`` — inference happens in a **separate process** (``npu_yolo_sidecar``)
+  running under the Ryzen AI venv on the XDNA2 NPU, because onnxruntime-vitisai
+  + XRT can't share this venv. Here the thread just polls the sidecar's
+  loopback HTTP ``/latest`` and republishes it, mirroring how ``VlmRunner``
+  talks to llama-server.
+
+Either way the public surface is identical: ``start`` / ``stop`` / ``ready`` /
+``get_latest()`` returning the same bbox dict, so ``app.py`` is backend-agnostic.
 """
 
 from __future__ import annotations
@@ -21,11 +25,14 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+_DEFAULT_SIDECAR_URL = "http://127.0.0.1:8082"
+
 
 class YoloRunner:
     def __init__(self, shm_name: str, yolo_cfg: dict[str, Any]) -> None:
         self._shm_name = shm_name
         self._yolo_cfg = yolo_cfg
+        self._backend = str(yolo_cfg.get("backend", "gpu")).lower()
         self._latest: dict[str, Any] | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -50,6 +57,51 @@ class YoloRunner:
         return self._ready.is_set()
 
     def _run(self) -> None:
+        if self._backend == "npu":
+            self._run_npu()
+        else:
+            self._run_gpu()
+
+    def _run_npu(self) -> None:
+        """Poll the NPU sidecar's loopback HTTP and republish its bbox JSON.
+
+        The sidecar (``scripts/npu_yolo_sidecar.py``, Ryzen AI venv) already
+        emits the exact ``_publish`` schema, so we forward it verbatim. It may
+        not be up yet when ``serve`` starts — we retry until it answers.
+        """
+        import requests  # noqa: PLC0415
+
+        npu_cfg = self._yolo_cfg.get("npu", {})
+        base = str(npu_cfg.get("sidecar_url", _DEFAULT_SIDECAR_URL)).rstrip("/")
+        url = f"{base}/latest"
+        poll_period = 1.0 / float(npu_cfg.get("poll_hz", 60))
+        log.info("yolo-runner[npu]: polling sidecar %s at %.0f Hz", url, 1.0 / poll_period)
+
+        session = requests.Session()
+        warned = False
+        while not self._stop.is_set():
+            try:
+                resp = session.get(url, timeout=1.0)
+                if resp.status_code == 200:
+                    with self._lock:
+                        self._latest = resp.json()
+                    if not self._ready.is_set():
+                        log.info("yolo-runner[npu]: sidecar ready")
+                        self._ready.set()
+                    warned = False
+                elif resp.status_code == 503:
+                    # sidecar up but no frame yet — keep waiting quietly
+                    pass
+            except requests.RequestException as e:
+                if not warned:
+                    log.info("yolo-runner[npu]: sidecar not reachable yet (%s); retrying", e)
+                    warned = True
+                self._stop.wait(0.5)
+                continue
+            self._stop.wait(poll_period)
+        log.info("yolo-runner[npu]: thread exited")
+
+    def _run_gpu(self) -> None:
         # Defer heavy imports to the thread so server startup stays snappy.
         from src.capture.shm_writer import FrameSHM  # noqa: PLC0415
         from src.inference.yolo_worker import YoloWorker  # noqa: PLC0415

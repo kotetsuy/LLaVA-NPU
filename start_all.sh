@@ -19,6 +19,10 @@ VLM_MMPROJ="$HOME/nemotron-3/mmproj-F16.gguf"
 URL="http://localhost:8080/"
 SERVER_TIMEOUT=30  # seconds to wait for the server before opening the browser
 
+# NPU YOLO sidecar (only started when config.yaml yolo.backend == npu). It runs
+# under the Ryzen AI venv, which is the only env with onnxruntime-vitisai + XRT.
+RAI_ENV="$HOME/ryzenai/ryzenai_venv/setup_ryzenai_env.sh"
+
 # CLI options
 OPEN_BROWSER=1
 for arg in "$@"; do
@@ -55,6 +59,30 @@ if [[ ! -f "$VLM_MMPROJ" ]]; then
     exit 1
 fi
 
+# Read the YOLO backend + NPU settings from config.yaml (pyyaml is a core dep,
+# so `uv run` always has it). Defaults keep us on the GPU path if parsing fails.
+read -r YOLO_BACKEND NPU_ONNX NPU_PORT < <(
+    cd "$PROJECT_DIR" && uv run python - <<'PY' 2>/dev/null || echo "gpu - -"
+import yaml
+y = yaml.safe_load(open("config.yaml")).get("yolo", {})
+npu = y.get("npu", {})
+print(y.get("backend", "gpu"), npu.get("onnx", "models/yolo11m_a16w8.onnx"), npu.get("port", 8082))
+PY
+)
+
+if [[ "$YOLO_BACKEND" == "npu" ]]; then
+    if [[ ! -f "$RAI_ENV" ]]; then
+        echo "ERROR: yolo.backend=npu but Ryzen AI env not found at $RAI_ENV" >&2
+        echo "       Set yolo.backend: gpu in config.yaml to use the GPU path instead." >&2
+        exit 1
+    fi
+    if [[ ! -f "$PROJECT_DIR/$NPU_ONNX" ]]; then
+        echo "ERROR: NPU model not found at $PROJECT_DIR/$NPU_ONNX" >&2
+        echo "       Copy it: cp ~/yolotest/yolo11m_a16w8.onnx $PROJECT_DIR/models/" >&2
+        exit 1
+    fi
+fi
+
 if tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "ERROR: tmux session '$SESSION' is already running."
     echo "       Run ./stop_all.sh first, or attach: tmux attach -t $SESSION"
@@ -80,11 +108,25 @@ tmux send-keys -t "$SESSION:vlm" "${ENV_PREFIX}${LLAMA_BIN} \
   --mmproj '$VLM_MMPROJ' \
   -c 8192 -ngl 99 --port 8081 --host 127.0.0.1 --reasoning off" C-m
 
+# npu-yolo (only for backend: npu). Runs under the Ryzen AI venv — do NOT apply
+# ENV_PREFIX (HSA_OVERRIDE etc. are for the GPU); setup_ryzenai_env.sh sets XRT.
+# PYTHONPATH lets the sidecar import src.capture.shm_writer (pure-python SHM).
+WINDOWS_MSG="3 windows: capture, serve, vlm"
+SWITCH_MSG="Ctrl-b 0 (capture), Ctrl-b 1 (serve), Ctrl-b 2 (vlm)"
+if [[ "$YOLO_BACKEND" == "npu" ]]; then
+    tmux new-window -t "$SESSION:" -n npu-yolo -c "$PROJECT_DIR"
+    tmux send-keys -t "$SESSION:npu-yolo" \
+      "source '$RAI_ENV' && PYTHONPATH='$PROJECT_DIR' \
+python '$PROJECT_DIR/scripts/npu_yolo_sidecar.py' --model '$NPU_ONNX' --port $NPU_PORT" C-m
+    WINDOWS_MSG="4 windows: capture, serve, vlm, npu-yolo"
+    SWITCH_MSG="Ctrl-b 0 (capture), 1 (serve), 2 (vlm), 3 (npu-yolo)"
+fi
+
 cat <<EOF
-Started tmux session '$SESSION' with 3 windows: capture, serve, vlm.
+Started tmux session '$SESSION' with $WINDOWS_MSG.
 
   Attach :  tmux attach -t $SESSION
-  Switch :  Ctrl-b 0 (capture), Ctrl-b 1 (serve), Ctrl-b 2 (vlm)
+  Switch :  $SWITCH_MSG
   Detach :  Ctrl-b d
   Stop   :  ./stop_all.sh
 
