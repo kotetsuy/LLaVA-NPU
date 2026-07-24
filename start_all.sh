@@ -99,9 +99,11 @@ tmux send-keys -t "$SESSION:capture" "${ENV_PREFIX}uv run capture-run" C-m
 # Give capture ~1s head-start so SHM is ready before yolo/vlm start probing.
 sleep 1
 
-# serve (FastAPI + aiortc + YoloRunner + VlmRunner)
+# serve (FastAPI + aiortc + YoloRunner + VlmRunner). The webrtc extra carries
+# fastapi/aiortc/uvicorn/requests — `uv run` without it syncs the env down to the
+# base deps and serve dies with ModuleNotFoundError: fastapi.
 tmux new-window -t "$SESSION:" -n serve -c "$PROJECT_DIR"
-tmux send-keys -t "$SESSION:serve" "${ENV_PREFIX}uv run serve" C-m
+tmux send-keys -t "$SESSION:serve" "${ENV_PREFIX}uv run --extra webrtc serve" C-m
 
 # llama-server (multimodal Nemotron). --reasoning off is required:
 # without it the *-Reasoning model spends n_predict on thinking tokens.

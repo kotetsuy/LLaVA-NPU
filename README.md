@@ -266,6 +266,108 @@ uv run python -c "from src.server.app import app; print('imports OK')"
 
 ---
 
+## NPU backend (run YOLO11m on the XDNA2 NPU)
+
+YOLO11m object detection can be moved off the GPU (ROCm, `yolo11m.pt`) onto the
+**Strix Halo NPU (XDNA2, VitisAI EP, `yolo11m_a16w8.onnx`)**. The VLM (Nemotron),
+camera, and MJPEG delivery are untouched. It is implemented as a sidecar (a separate
+process talking local HTTP, exactly like the VLM's llama-server). Switch backends with
+`yolo.backend` in `config.yaml`; rolling back to the GPU path is a one-liner.
+See [`TECHNICAL.md`](./TECHNICAL.md) for architecture, design rationale, and on-device verification.
+
+### Results summary (what now works)
+
+| Item | Result |
+|---|---|
+| YOLO11m detection on the NPU | ✅ On bus.jpg, **4× person + 1× bus** (conf 0.89/0.89/0.89/0.75, bus 0.87) — matches yolotest's A16W8 |
+| NPU offload proven | ✅ `xrt-smi` shows **HW Context=Active, Columns[0-7], rising Submissions** |
+| Coordinate system (inverse letterbox) | ✅ bboxes map back to the input-frame coordinate system (≈1280×720); all boxes stay in-frame |
+| Throughput | ✅ ~28–29 inf/s after warmup (on par with yolotest; the 30 fps camera is naturally decimated by "process latest frame") |
+| Backend switch | ✅ `config.yaml` `yolo.backend: npu|gpu` — if npu misbehaves, just go back to gpu |
+| Client compatibility | ✅ bbox JSON schema and `/ws/bbox` are unchanged (the browser canvas needs no edits) |
+
+### Usage
+
+#### Switch backend (`config.yaml`)
+```yaml
+yolo:
+  backend: npu   # npu = XDNA2 NPU (VitisAI, separate process) / gpu = Ultralytics (ROCm, inside serve)
+```
+
+#### Start / stop
+```bash
+./start_all.sh          # with backend:npu, the npu-yolo window starts automatically too
+./stop_all.sh
+tmux attach -t llava    # Ctrl-b 0/1/2/3 = capture/serve/vlm/npu-yolo
+```
+Start order doesn't matter (serve retries over HTTP until the sidecar is up).
+
+#### Verify (on real hardware)
+```bash
+# With the sidecar running, confirm NPU offload from another terminal
+/opt/xilinx/xrt/bin/xrt-smi examine -d 0000:c6:00.1 -r all
+#  → HW Context=Active, Columns[0-7], rising Submissions = running on the NPU
+```
+Open `http://localhost:8080/` in the browser and eyeball that people/objects sit inside
+their bboxes. (The pass criterion is not "`Test Finished`" but "`xrt-smi` shows Active"
+plus "boxes in the right place in the browser".)
+
+### Operational notes (learned during implementation)
+
+- **First compile ~20 s**: on the first launch in this repo, VitisAI compiles the
+  quantized model, so the very first inference takes about 20 s. The sidecar only starts
+  serving `/latest` **after warmup completes**, so serve simply waits (bbox is empty, then
+  starts appearing). Subsequent runs are fast. `vaip_cache/` is added to `.gitignore` just in case.
+- **Keep the venvs separate**: the sidecar runs under the RAI venv
+  (`source setup_ryzenai_env.sh`); serve runs under the uv venv. `start_all.sh` sources the
+  RAI env only in the sidecar window and does **not** apply the ROCm `ENV_PREFIX`
+  (`HSA_OVERRIDE_GFX_VERSION` etc. — the NPU doesn't need them).
+- **Sidecar launch command**: it runs under the RAI venv's python with `PYTHONPATH=<repo>`
+  (so it can import `src.capture.shm_writer` / `src.npu_yolo.postprocess`). It is **not** `uv run`.
+  `start_all.sh` assembles this form automatically.
+- **Rollback**: if the NPU misbehaves, set `yolo.backend: gpu` in `config.yaml`. The sidecar
+  is then not started and the legacy ultralytics/GPU path runs inside the serve process.
+
+### What you need at runtime (the `~/yolotest` folder is not required)
+
+- `~/ryzenai/ryzenai_venv` (onnxruntime-vitisai 1.23.3 / voe 1.7.1) + the XRT/NPU stack
+- `models/yolo11m_a16w8.onnx` (already copied in)
+- LLaVA's uv venv (the npu path uses `requests` = the webrtc extra)
+
+`~/yolotest` is needed **only when re-quantizing** (below); normal operation never touches it.
+Both the model and the pre/post-processing code are vendored into the repo, so LLaVA-NPU is
+self-contained.
+
+#### When you need to re-quantize (normally unnecessary)
+Only if you want to rebuild the A16W8 model:
+```bash
+cd ~/ryzenai/ryzenai_venv && source setup_ryzenai_env.sh
+python ~/yolotest/quantize_yolo11m_a16w8.py --input ~/yolo/yolo11m.onnx \
+    --output ~/LLaVA-NPU/models/yolo11m_a16w8.onnx --calib-dir ~/yolotest/calib2
+```
+
+---
+
+## NPU recovery / operations notes (after an environment upgrade)
+
+Right after upgrading Ubuntu to **26.04** and ROCm to **7.14**, the NPU (`amdxdna`) can stop
+working. Three independent problems were isolated and fixed until, at ordinary user
+privilege, `xrt-smi examine` recognizes the **NPU Strix Halo (Firmware 1.1.2.65)**. See the
+"NPU recovery" section of [`TECHNICAL.md`](./TECHNICAL.md) for root causes and the fix commands.
+
+### Final verification (after reboot, as ordinary user `araki`) — ✅ all pass
+
+```bash
+ulimit -l                                              # → unlimited                     ✅
+ls -l /dev/accel/accel0                                # crw-rw-rw-+ root render 261,0    ✅
+source /opt/xilinx/xrt/setup.sh && xrt-smi examine     # [0000:c6:00.1] NPU Strix Halo    ✅
+```
+
+If all three pass without `sudo`, the YOLO11m NPU pipeline (`start_all.sh` /
+`scripts/npu_yolo_sidecar.py`) can be run at ordinary user privilege.
+
+---
+
 ## License
 
 See [`LICENSE`](./LICENSE).

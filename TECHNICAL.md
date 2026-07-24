@@ -343,7 +343,243 @@ Sends `Ctrl-C` to each window → waits 5 s → `tmux kill-session`. Any survivo
 
 ---
 
-## 8. Related documents
+## 8. NPU backend for YOLO11m (XDNA2 / VitisAI EP)
+
+Record of moving YOLO11m object detection from the legacy **Ultralytics YOLO (GPU/ROCm,
+`yolo11m.pt`)** onto **NPU execution (VitisAI EP, `yolo11m_a16w8.onnx`)** (implementation and
+on-device validation: Opus, 2026-07-07). The VLM (Nemotron), camera, and MJPEG delivery are
+untouched. It is built as a sidecar; detection was reproduced on real NPU hardware, offload
+was demonstrated with `xrt-smi`, and the HTTP wiring was integration-tested. See
+[`README.md`](./README.md) for usage and operational notes.
+
+### 8.1 As-built architecture
+
+The same "separate process + local HTTP" pattern as the VLM (llama-server). NPU inference is
+isolated in its own process (the sidecar); the serve process merely polls its HTTP.
+
+```
+[capture proc]          [npu-yolo sidecar proc]              [serve proc (uv venv)]
+ USB cam                 RAI venv + VitisAI EP                FastAPI + MJPEG + WS
+   |                       |  attach SHM(webcam_latest)          |
+   |---> SHM ------------->|  read latest frame (when seq moved) |
+                           |  preprocess: letterbox640/RGB/÷255  |
+                           |  onnx(a16w8) inference @ NPU        |
+                           |  decode + class-aware NMS           |
+                           |  inverse letterbox → input coords   |
+                           |  bbox JSON  --HTTP GET /latest------>|  poll(60Hz) → get_latest()
+                           |  (http.server /latest, /health)     |  → push to /ws/bbox (unchanged)
+```
+
+**Why a separate process**: NPU execution needs `onnxruntime-vitisai` + XRT's
+`LD_LIBRARY_PATH`, which only exist in `~/ryzenai/ryzenai_venv`. Merging that with LLaVA's
+own uv venv (torch-ROCm / ultralytics / fastapi) risks dependency conflicts and environment
+pollution, so — like the VLM — we split it into its own process. The enabler is that
+`FrameSHM` in `src/capture/shm_writer.py` is pure Python (only numpy +
+`multiprocessing.shared_memory`, no torch), so it can be imported from the RAI venv to read SHM.
+
+### 8.2 Files added / changed
+
+| File | Kind | Contents |
+|---|---|---|
+| `src/npu_yolo/postprocess.py` | new | Pure numpy/cv2 pre/post-processing: `letterbox`, `preprocess`, **`decode_detections` with inverse letterbox + class-aware NMS**, `COCO_CLASSES`. torch-free, so importable from the RAI venv |
+| `src/npu_yolo/__init__.py` | new | Empty. A standalone subpackage so it does not drag in `src/inference/__init__.py` (which imports the vlm/yolo workers) |
+| `scripts/npu_yolo_sidecar.py` | new | **The NPU sidecar itself.** Runs under the RAI venv. Subscribes to SHM → VitisAI EP inference → decode → serves `/latest` and `/health` via the stdlib `http.server`. Inference on a daemon thread, HTTP on the main thread |
+| `src/server/yolo_runner.py` | changed | Branches on `backend`. `npu` = poll the sidecar's `/latest` and re-broadcast; `gpu` = the legacy ultralytics thread. The external interface (`start`/`stop`/`ready`/`get_latest`) is unchanged, so **app.py needs no edits** |
+| `config.yaml` | changed | Adds `yolo.backend: npu` and `yolo.npu:{onnx,sidecar_url,port,poll_hz}`. The gpu settings (`model`/`device`/`half`) are kept too |
+| `start_all.sh` | changed | Reads `backend` from config and, only when `npu`, starts a 4th tmux window `npu-yolo` under the RAI venv, with existence checks for the model and RAI env. Windows 0/1/2 (capture/serve/vlm) are unchanged; npu-yolo is 3 |
+| `stop_all.sh` | changed | Adds cleanup for the `npu-yolo` window and the `npu_yolo_sidecar` process |
+| `tests/test_npu_postprocess.py` | new | Unit tests (6) for inverse letterbox, clipping, class-aware NMS, and thresholds |
+| `.gitignore` | changed | Adds NPU compile caches such as `vaip_cache/` |
+| `models/yolo11m_a16w8.onnx` | placed | Copied from `~/yolotest`. `*.onnx` is `.gitignore`d, i.e. not committed to the repo |
+
+### 8.3 On-device verification results
+
+| Check | Result |
+|---|---|
+| Unit tests (6 pre/post-processing) | ✅ 6/6 pass |
+| Real NPU inference + decode (bus.jpg) | ✅ **4× person + 1× bus** (0.89/0.89/0.89/0.75, bus 0.87). ~34 ms/frame |
+| Inverse-letterbox coordinates | ✅ All bboxes inbounds within the 810×1080 frame; correct in the input-frame coordinate system |
+| NPU offload (`xrt-smi`) | ✅ **HW Context=Active, Columns[0-7], Submissions rising 5→64→123** |
+| HTTP wiring (sidecar ⇄ YoloRunner) | ✅ Integration test confirmed `/latest` (200/503), `/health`, and `runner.get_latest()` agree |
+| Syntax check | ✅ `compileall` and `bash -n` both OK |
+
+The live end-to-end path (camera → SHM → sidecar → serve → browser) was confirmed on real
+camera hardware after the 2026-07-24 environment recovery (`start_all.sh` brings up all 4
+windows in one shot; `/latest` returns `person conf=0.73` etc. — see §9).
+
+### 8.4 Design rationale (why this way)
+
+#### 8.4.1 Assumptions already established by yolotest
+| Fact | Detail |
+|---|---|
+| YOLO11m runs on the NPU | A16W8 quantization → VitisAI EP offloads every node, ~28 inf/s |
+| **A16W8 is mandatory** | XINT8 (8-bit activations) collapses the classification head → **zero detections**. A16W8 (INT16 activations / INT8 weights) recovers FP32-equivalent accuracy |
+| A quantized model already exists | `~/yolotest/yolo11m_a16w8.onnx` (usable as-is, no re-quantization needed) |
+| A prototype for pre/post-processing exists | `~/yolotest/decode_detect.py` (letterbox640 + decode + NMS) |
+
+Primary sources: `~/yolotest/READMEJ.md` (the working procedure), `~/yolotest/HANDOFF.md`
+(failure cases and the xrt-smi pass criteria).
+
+#### 8.4.2 Coordinate system (inverse letterbox) — the biggest implementation point
+Ultralytics returned bboxes in the **input-frame coordinate system** for a 1280×720 input.
+The NPU path does its own 640 letterbox, so using `decode_detect.py` (which displayed in raw
+640 coordinates) as-is would misplace the boxes. `src/npu_yolo/postprocess.py` implements a
+strict **inverse letterbox**: with `scale = min(640/h, 640/w)` and `left,top` as the padding,
+`x_orig = (x_lb - left)/scale`, `y_orig = (y_lb - top)/scale`, then clip to the frame bounds.
+This transform is pinned by unit tests. NMS is made **class-aware** to match the Ultralytics
+default (boxes of different classes do not suppress each other).
+
+#### 8.4.3 bbox JSON schema (kept unchanged for client compatibility)
+The sidecar emits the same schema as `YoloRunner._publish`, and serve forwards it verbatim to `/ws/bbox`:
+```python
+{"frame_seq", "ts_ns", "frame_w", "frame_h", "connected",
+ "boxes": [{"label", "conf", "x1", "y1", "x2", "y2"}, ...]}   # coords in the input-frame system
+```
+`frame_seq` carries the SHM seq as-is, so app.py's seq-based dedup keeps working as before.
+
+### 8.5 Out of scope (not touched here)
+- The VLM (Nemotron / llama-server) path — unchanged.
+- Camera capture / SHM writer / MJPEG delivery / WebSocket wiring — unchanged (`FrameSHM` is only read from the sidecar).
+- Accuracy tuning — A16W8 already yields FP32-equivalent results, so no extra quantization work.
+
+---
+
+## 9. NPU recovery after OS/ROCm upgrade (Ubuntu 26.04 / ROCm 7.14)
+
+Right after upgrading Ubuntu to **26.04** and ROCm to **7.14**, the NPU (`amdxdna`) stopped
+working (performed by: Opus 4.8, 2026-07-24). Several independent problems were isolated and
+fixed until, at ordinary user privilege, `xrt-smi examine` recognizes the **NPU Strix Halo
+(Firmware 1.1.2.65)**. For the operator-facing final-verification steps, see the "NPU
+recovery / operations notes" section of [`README.md`](./README.md).
+
+### 9.1 Symptoms before recovery
+- `xrt-smi examine` → **0 devices found**
+- `/dev/accel/` does not exist
+- `lsmod | grep xdna` → empty (`amdxdna` not loaded)
+- but recognized on PCI: `c6:00.1 ... Strix Halo Neural Processing Unit`
+
+### 9.2 Root causes and fixes (3 independent NPU-device-side problems)
+
+| # | Problem | Root cause | Fix |
+|---|---------|------------|-----|
+| 1 | `amdxdna` not loaded | Not auto-loaded after the kernel swap | Resolved by the DKMS rebuild (folded into #2) |
+| 2 | `modprobe amdxdna` → `Exec format error` / `disagrees about version of symbol module_layout` | **The DKMS module was built against stale headers.** The running kernel is a gcc-15 build (`module_layout` CRC `0xe9196a28`), but the DKMS artifact demanded `0xd954c786`. During the Ubuntu 26.04 upgrade, the "running kernel image" and the "header state DKMS builds against" drifted apart | Rebuild DKMS against the current kernel |
+| 3 | `xrt-smi examine` → `mmap(len=64MB, offset=4GB) failed (err=-11 EAGAIN)` | **The memlock limit was 8 MB (8192 KB)** — too low for the 64 MB of pinned memory XRT/NPU requests (confirmed by the fact that it succeeded under root, where memlock is looser) | Apply `memlock unlimited` to all users |
+
+```bash
+# --- Problems #1/#2: rebuild DKMS against the current kernel ---
+sudo dkms remove  xrt-amdxdna/2.21.260102.53.release --all
+sudo dkms install xrt-amdxdna/2.21.260102.53.release
+sudo depmod -a
+
+# Pre-check: does the required CRC match the running kernel? (note it's a .ko.zst)
+modprobe --dump-modversions /lib/modules/$(uname -r)/updates/dkms/amdxdna.ko.zst | grep module_layout
+#  → 0xe9196a28  module_layout  (matching the kernel image = likely to succeed)
+
+sudo modprobe amdxdna
+ls -l /dev/accel/          # → accel0 gets created
+
+# --- Problem #3: memlock to unlimited (applied to PAM login sessions) ---
+echo '* - memlock unlimited' | sudo tee /etc/security/limits.d/99-xrt-memlock.conf
+# NB: takes effect after re-login. The current root session is already loose, so verify via sudo:
+sudo bash -c 'source /opt/xilinx/xrt/setup.sh; xrt-smi examine'
+```
+
+Post-recovery confirmation:
+```
+XRT
+  Version              : 2.21.75
+  amdxdna Version      : 2.21.260102.53.release_20260309
+  NPU Firmware Version : 1.1.2.65
+
+Device(s) Present
+  [0000:c6:00.1]  NPU Strix Halo   ✅
+
+dmesg:
+  amdxdna 0000:c6:00.1: PASID address mode enabled
+  [drm] Initialized amdxdna_accel_driver 1.0.0 for 0000:c6:00.1 on minor 0
+```
+- Kernel: `7.0.0-28-generic` (gcc 15.2.0 build)
+- `ulimit -l`: loose/succeeds under root; ordinary users get **unlimited after re-login**
+
+### 9.3 Two environment problems surfaced at pipeline launch (`start_all.sh`)
+
+After the NPU itself was recovered, the first `./start_all.sh` brought up 4 windows in which
+**capture / vlm were fine** but **serve and npu-yolo failed to start for separate reasons** —
+both side effects of the Ubuntu 26.04 upgrade.
+
+| # | Window | Symptom | Root cause | Fix |
+|---|--------|---------|------------|-----|
+| A | serve | `ModuleNotFoundError: No module named 'fastapi'` | The upgrade **recreated `.venv` with base deps only**; fastapi etc. live in `[project.optional-dependencies].webrtc` and were not synced. `uv run serve` implicitly syncs the env down to base, so fastapi never lands | Launch with **`uv run --extra webrtc serve`** (fixed in `start_all.sh`) |
+| B | npu-yolo | `ModuleNotFoundError: No module named 'encodings'` / `init_fs_encoding failed` (the interpreter itself won't boot) | The ryzenai venv was built **from the old `/usr/bin/python3.12` (3.12.3) with `--copies`**. Under 26.04 the system Python became **3.14**, so `/usr/bin/python3.12` and `/usr/lib/python3.12` (stdlib) disappeared → the copied python binary lost its stdlib and cannot boot | **In-place upgrade** the venv with the uv-managed standalone `cpython-3.12.13` (swap only the interpreter/stdlib references, keeping all 330 site-packages) |
+
+Fix commands for problem B:
+```bash
+# Facts established by prior investigation:
+#  - RAI 1.7.1 officially supports Python 3.12.x only (3.13/3.14 unsupported)
+#    → https://ryzenai.docs.amd.com/en/latest/linux.html ("Install Python 3.12.x")
+#  - The venv's 330 site-packages (onnxruntime_vitisai 1.23.3 / voe 1.7.1, etc.)
+#    are all cp312 wheels. Only the interpreter + stdlib were broken.
+#  - apt has no python3.12 on 26.04. Use the uv-managed 3.12.13 standalone.
+
+STD=/home/araki/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12
+VENV=/home/araki/ryzenai/ryzenai_venv/venv
+
+# Delete the old --copies binaries first, then recreate the venv (site-packages survive)
+rm -f "$VENV"/bin/python "$VENV"/bin/python3 "$VENV"/bin/python3.12
+"$STD" -m venv --without-pip "$VENV"     # regenerate bin/ as symlinks to the standalone
+
+# Verify: success if VitisAIExecutionProvider appears
+source /home/araki/ryzenai/ryzenai_venv/setup_ryzenai_env.sh
+python -c "import onnxruntime as ort, voe; print(ort.__version__, ort.get_available_providers())"
+#  → 1.23.3.dev...  ['VitisAIExecutionProvider', 'CPUExecutionProvider']
+```
+
+Launch confirmation (all 4 windows):
+```
+capture   : 30fps  1280x720 BGR → SHM
+serve     : http://localhost:8080/  HTTP 200
+vlm       : llama-server 8081  Nemotron caption ~1.2s
+npu-yolo  : VitisAIExecutionProvider session established / warmup 40ms
+            http://127.0.0.1:8082/latest → {"boxes":[{"label":"person","conf":0.73,...}]}  ✅ NPU inference
+```
+
+### 9.4 Lessons for next time (easy-to-recur pitfalls)
+
+1. **If the NPU vanishes after a kernel update, suspect the DKMS rebuild first.**
+   Even with the same Ubuntu version string (e.g. `7.0.0-28.28`), if the running kernel image
+   and its headers drift during an upgrade you get a `module_layout` CRC mismatch
+   (`Exec format error`). `sudo dkms install xrt-amdxdna/<ver>` rebuilds it against the
+   current kernel and fixes it.
+   - The kernel also ships an **in-tree `amdxdna`**
+     (`/lib/modules/$(uname -r)/kernel/drivers/accel/amdxdna/amdxdna.ko.zst`; its CRC always
+     matches the kernel). If DKMS can't be fixed, `sudo dkms uninstall ...` to fall back to
+     the in-tree version is an option — but confirm ABI compatibility with the XRT 2.21
+     userspace via whether `xrt-smi examine` succeeds. This time the DKMS version worked.
+
+2. **memlock unlimited is a hard requirement for XRT/NPU.**
+   Too low a memlock fails device recognition with `mmap ... EAGAIN`.
+   Already set in `/etc/security/limits.d/99-xrt-memlock.conf` as `* - memlock unlimited`.
+   - This only takes effect for **PAM login sessions**. If `start_all.sh` is ever turned into
+     a **systemd service**, it won't go through PAM, so the unit needs `LimitMEMLOCK=infinity` separately.
+
+3. **After a major OS upgrade, "venvs that depend on the system Python" break.**
+   On Ubuntu 26.04 the system Python became 3.14, so the ryzenai venv built from
+   `/usr/bin/python3.12` with `--copies` became unbootable at the interpreter level
+   (`No module named 'encodings'`). Since **RAI is Python 3.12.x only** (3.13/3.14
+   unsupported), and 26.04 has no apt python3.12, use the **uv-managed standalone 3.12.13**
+   and swap only the interpreter with `python -m venv --without-pip <venv>` (after `rm`-ing
+   the old bin/python*), **keeping site-packages intact**. The cp312 wheels keep working.
+
+4. **serve in `start_all.sh` requires `--extra webrtc`.**
+   fastapi/aiortc/uvicorn/requests live in the `pyproject.toml` optional group `webrtc`.
+   If `.venv` is recreated with base deps only (e.g. after an OS upgrade), `uv run serve`
+   (no extra) implicitly syncs the env down to base and fastapi disappears. Launch with
+   **`uv run --extra webrtc serve`** (fixed in `start_all.sh` on 2026-07-24).
+
+---
+
+## 10. Related documents
 
 - [`HANDOFF.md`](./HANDOFF.md) — original Claude.ai design doc translated to English (the input to this implementation)
 - [`README.md`](./README.md) — git clone → running, step by step
