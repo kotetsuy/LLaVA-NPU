@@ -85,12 +85,18 @@ The extra is still named `webrtc` for historical reasons; the current server str
 Add these to `~/.bashrc` so new shells pick them up automatically:
 
 ```bash
-export HSA_OVERRIDE_GFX_VERSION=11.5.1
 export ROCM_PATH=/opt/rocm
 export HIP_VISIBLE_DEVICES=0
 ```
 
 (`start_all.sh` re-exports these inside each tmux pane, so you're covered even if you forget to set them in your shell.)
+
+> **Do not set `HSA_OVERRIDE_GFX_VERSION`.** The ROCm wheels and the llama.cpp
+> build (`-DAMDGPU_TARGETS=gfx1151`) are native gfx1151 builds, so the override
+> buys nothing — and a stale value copied from an old runbook is fatal: with
+> `HSA_OVERRIDE_GFX_VERSION=11.0.0` the runtime reports `gfx1100` and every
+> kernel launch fails (`HIP error: invalid device function`). `start_all.sh`
+> explicitly `unset`s it in case a shell profile exports it.
 
 ### 7. Fetch the Nemotron Nano Omni GGUF
 
@@ -321,7 +327,7 @@ plus "boxes in the right place in the browser".)
 - **Keep the venvs separate**: the sidecar runs under the RAI venv
   (`source setup_ryzenai_env.sh`); serve runs under the uv venv. `start_all.sh` sources the
   RAI env only in the sidecar window and does **not** apply the ROCm `ENV_PREFIX`
-  (`HSA_OVERRIDE_GFX_VERSION` etc. — the NPU doesn't need them).
+  (`ROCM_PATH` / `HIP_VISIBLE_DEVICES` — the NPU doesn't need them).
 - **Sidecar launch command**: it runs under the RAI venv's python with `PYTHONPATH=<repo>`
   (so it can import `src.capture.shm_writer` / `src.npu_yolo.postprocess`). It is **not** `uv run`.
   `start_all.sh` assembles this form automatically.

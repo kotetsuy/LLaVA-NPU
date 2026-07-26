@@ -84,12 +84,19 @@ extra 名は歴史的経緯で `webrtc` のままですが、現行サーバは 
 `~/.bashrc` などに追加して、新しいシェルで自動的に効くようにしておくと楽:
 
 ```bash
-export HSA_OVERRIDE_GFX_VERSION=11.5.1
 export ROCM_PATH=/opt/rocm
 export HIP_VISIBLE_DEVICES=0
 ```
 
 (`start_all.sh` は内部で再 export するので、シェル設定を忘れていても tmux セッションでは効きます。)
+
+> **`HSA_OVERRIDE_GFX_VERSION` は設定しないこと。** ROCm wheel も llama.cpp
+> (`-DAMDGPU_TARGETS=gfx1151`) も gfx1151 ネイティブビルドなので、override を付けても
+> 得るものはありません。逆に古い手順書からコピーした値が残っていると致命的で、
+> `HSA_OVERRIDE_GFX_VERSION=11.0.0` だとランタイムが `gfx1100` として認識し、
+> カーネル起動がすべて失敗します (`HIP error: invalid device function`)。
+> シェルのプロファイルで export されている場合に備え、`start_all.sh` は明示的に
+> `unset` しています。
 
 ### 7. Nemotron Nano Omni GGUF の準備
 
@@ -317,7 +324,7 @@ tmux attach -t llava    # Ctrl-b 0/1/2/3 = capture/serve/vlm/npu-yolo
   念のため `.gitignore` に `vaip_cache/` を追加済み。
 - **venv 分離は厳守**: サイドカーは RAI venv(`source setup_ryzenai_env.sh`)、serve は uv venv。
   `start_all.sh` はサイドカーのウィンドウにだけ RAI env を source し、ROCm 用 `ENV_PREFIX`
-  (`HSA_OVERRIDE_GFX_VERSION` 等) は付けない（NPU には不要）。
+  (`ROCM_PATH` / `HIP_VISIBLE_DEVICES`) は付けない（NPU には不要）。
 - **サイドカーの起動コマンド**: RAI venv の python で、`PYTHONPATH=<repo>` を通して起動する
   （`src.capture.shm_writer` / `src.npu_yolo.postprocess` を import するため）。`uv run` ではない。
   `start_all.sh` が自動でこの形にする。

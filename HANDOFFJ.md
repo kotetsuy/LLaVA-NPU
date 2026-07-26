@@ -35,7 +35,7 @@ NucBox EVO X2 上で以下を同時に動かし、Chrome ブラウザで低遅�
 | メモリ | 48GB unified (BIOS で VRAM 割当済) |
 | OS | Ubuntu 24.04.4 LTS (HWE kernel) |
 | ROCm | 7.2.2 (`/opt/rocm` 経由 symlink) |
-| 環境変数 | `HSA_OVERRIDE_GFX_VERSION=11.5.1` |
+| 環境変数 | `ROCM_PATH=/opt/rocm`, `HIP_VISIBLE_DEVICES=0`（`HSA_OVERRIDE_GFX_VERSION` は**設定しない** — すべて gfx1151 ネイティブビルドのため） |
 | 既存資産 | llama.cpp (ROCm/HIP 版、`-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1151`) |
 | 既存資産 | ROCm PyTorch wheels (repo.radeon.com 由来) |
 | 既存資産 | WhisperX/Ollama/VOICEVOX のローカル AI パイプラインの経験あり |

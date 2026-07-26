@@ -34,7 +34,7 @@ See `LLaVA設計図.pptx` for the screen mock.
 | Memory | 48 GB unified (BIOS-allocated VRAM) |
 | OS | Ubuntu 24.04.4 LTS (HWE kernel) |
 | ROCm | 7.2.2 (`/opt/rocm` symlink) |
-| Env vars | `HSA_OVERRIDE_GFX_VERSION=11.5.1` |
+| Env vars | `ROCM_PATH=/opt/rocm`, `HIP_VISIBLE_DEVICES=0` (do **not** set `HSA_OVERRIDE_GFX_VERSION` — everything is a native gfx1151 build) |
 | Existing assets | llama.cpp ROCm/HIP build (`-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1151`) |
 | Existing assets | ROCm PyTorch wheels (from repo.radeon.com) |
 | Existing assets | Practical experience with WhisperX / Ollama / VOICEVOX local AI pipelines |

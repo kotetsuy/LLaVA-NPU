@@ -305,7 +305,7 @@ tmux session `llava` に 3 windows:
 2. `serve` ← `uv run serve` (FastAPI + YoloRunner + VlmRunner)
 3. `vlm` ← `~/llama.cpp/build/bin/llama-server ... --reasoning off`
 
-ROCm 環境変数を per-pane で `export` するので `~/.bashrc` に書き忘れていても確実に効きます。`http://localhost:8080/` がレスポンスを返すまで `curl` で 30 秒ポーリングしてから Chrome (or chromium / xdg-open) を起動。
+ROCm 環境変数 (`ROCM_PATH`, `HIP_VISIBLE_DEVICES`) を per-pane で `export` するので `~/.bashrc` に書き忘れていても確実に効きます。`HSA_OVERRIDE_GFX_VERSION` は逆に意図的に **`unset`** します（§9.4-5 参照）。`http://localhost:8080/` がレスポンスを返すまで `curl` で 30 秒ポーリングしてから Chrome (or chromium / xdg-open) を起動。
 
 ### `stop_all.sh`
 
@@ -566,6 +566,17 @@ npu-yolo  : VitisAIExecutionProvider セッション確立 / warmup 40ms
    OS アップグレード等で `.venv` が base のみに再作成されると、`uv run serve`（extra なし）は
    暗黙同期で env を base に揃え fastapi が消える。**`uv run --extra webrtc serve`** で起動すること
    （2026-07-24 に `start_all.sh` を修正済み）。
+
+5. **この機体では `HSA_OVERRIDE_GFX_VERSION` を設定しない。**
+   ROCm PyTorch wheel も llama.cpp ビルド（`-DAMDGPU_TARGETS=gfx1151`）も gfx1151
+   ネイティブなので、override に得はない。しかも壊れ方が非対称で、`11.5.1`（= 実際の
+   gfx1151）はたまたま無害だが、古い手順書からコピーした値が残っていると致命的になる。
+   `HSA_OVERRIDE_GFX_VERSION=11.0.0` では `torch.cuda.is_available()` は `True` のまま
+   `gcnArchName` が **`gfx1100`** になり、以降のカーネル起動が全部失敗する
+   （`HIP error: invalid device function`）。値は環境変数由来なので、`~/.bashrc` の
+   `export` 一行が後々まで GPU 経路を静かに壊し続ける。そのため `start_all.sh` の
+   `ENV_PREFIX` では export ではなく `unset` している
+   （2026-07-26 変更・`RealtimeDepth` と同じ方針）。
 
 ---
 
