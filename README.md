@@ -320,10 +320,16 @@ plus "boxes in the right place in the browser".)
 
 ### Operational notes (learned during implementation)
 
-- **First compile ~20 s**: on the first launch in this repo, VitisAI compiles the
-  quantized model, so the very first inference takes about 20 s. The sidecar only starts
-  serving `/latest` **after warmup completes**, so serve simply waits (bbox is empty, then
-  starts appearing). Subsequent runs are fast. `vaip_cache/` is added to `.gitignore` just in case.
+- **First compile ~25 s, then ~0.7 s**: VitisAI compiles the quantized model for
+  `AMD_AIE2P_4x8_CMC_Overlay` at session-creation time. Ryzen AI 1.8 keeps nothing on disk
+  by itself (the 1.7.1 `cacheDir`/`cacheKey` provider options are no-ops there), so the
+  sidecar compiles once into `models/yolo11m_a16w8_ctx.onnx` — an EPContext model — and
+  reuses it on every later launch: session creation drops from ~25 s to ~0.7 s, with
+  bit-identical outputs and the same ~33 ms/inference. The cache is rebuilt automatically
+  when the source model, onnxruntime, or the Ryzen AI version changes (stamp:
+  `models/yolo11m_a16w8_ctx.json`); both files are gitignored. `--no-ctx-cache` opts out.
+  The sidecar only starts serving `/latest` **after warmup completes**, so serve simply
+  waits (bbox is empty, then starts appearing).
 - **Keep the venvs separate**: the sidecar runs under the RAI venv
   (`source scripts/rai_env.sh`); serve runs under the uv venv. `start_all.sh` sources the
   RAI env only in the sidecar window and does **not** apply the ROCm `ENV_PREFIX`

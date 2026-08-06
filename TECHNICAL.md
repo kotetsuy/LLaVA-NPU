@@ -655,6 +655,54 @@ workarounds that are easy to miss:
 `8192`, XRT dies with EAGAIN, so it now fails loudly and points at
 `~/ryzenai_1_8/fix_memlock.sh` (whose effect only applies to terminals opened afterwards).
 
+### 9.6 Sidecar startup: 25 s → 0.7 s with an EPContext model (2026-08-06)
+
+**Symptom.** After the 1.8 migration the npu-yolo window took ~40 s to start serving, where
+1.7.1 took ~5 s. Steady-state throughput was unaffected.
+
+**Measurement.** Timing `ort.InferenceSession(...)` and the first `run()` separately puts all
+of it in session creation — the warmup inference itself is 30 ms:
+
+```
+SESSION_INIT 24.76s providers=['VitisAIExecutionProvider', 'CPUExecutionProvider']
+WARMUP 0.03s
+  run0 32.8ms ...
+```
+
+The EP log shows why: `compile_pass_manager` runs the full AIE compile every launch
+(`Target architecture: AMD_AIE2P_4x8_CMC_Overlay`, `vaiml_compile_x2_v2 time: 8127 ms`,
+`PDI Swap times: 227`).
+
+**Root cause.** Nothing is written to disk. `~/.cache/vaip` never appears, and passing the
+1.7.1-era `cacheDir` / `cacheKey` provider options changes nothing — 1.8's flow
+(`EnableInMemoryMladfCompilePass`, `enable_cache_file_io_in_mem` in `vaip_config.json`) keeps
+the compiled artifacts in memory. 1.7.1's on-disk `vaip_cache/` is what made restarts cheap;
+that mechanism is simply gone, so every launch recompiled from scratch.
+
+**Fix** (`_ensure_ep_context` in `scripts/npu_yolo_sidecar.py`). Compile once ahead of time
+into an ONNX carrying an **EPContext** node, via ORT session config entries:
+
+```python
+so.add_session_config_entry("ep.context_enable", "1")
+so.add_session_config_entry("ep.context_file_path", str(tmp))
+so.add_session_config_entry("ep.context_embed_mode", "1")  # one self-contained file
+```
+
+`models/yolo11m_a16w8_ctx.onnx` (28 MB) is written next to the source model and loaded on
+every later launch. Measured on this machine:
+
+| | session init | inference | output |
+|---|---|---|---|
+| `yolo11m_a16w8.onnx` | 24.6 s | 32.9 ms | — |
+| `yolo11m_a16w8_ctx.onnx` | **0.67 s** | 32.9 ms | bit-identical (`np.array_equal` on the raw `(1,84,8400)` tensor) |
+
+Staleness is checked against a stamp (`models/yolo11m_a16w8_ctx.json`: source size + mtime,
+`ort.__version__`, `RAI_VERSION`) rather than left to the EP, whose cache-version check fires
+deep inside a C++ load. The compile writes to `*.tmp` and renames, so an interrupted run can't
+leave a half-written cache; if compilation fails for any reason the sidecar logs it and falls
+back to the original model — slow start, never a failed start. `--no-ctx-cache` opts out.
+Both artifacts are gitignored (`*.onnx` already covered the model; `*_ctx.json` was added).
+
 ---
 
 ## 10. Related documents

@@ -14,6 +14,10 @@ the VitisAI EP's onnxruntime and XRT's ``LD_LIBRARY_PATH``, which conflict with 
 torch-ROCm / ultralytics venv the FastAPI server runs in. So we mirror the VLM
 architecture: a standalone worker that ``serve`` talks to over loopback HTTP.
 
+Startup: the model is compiled for the NPU once and cached next to it as
+``<model>_ctx.onnx`` (an EPContext model), because Ryzen AI 1.8 otherwise
+recompiles the graph on every launch — see ``_ensure_ep_context``.
+
 Flow: attach the capture SHM -> read the latest 1280x720 BGR frame -> letterbox
 to 640 -> VitisAI EP inference on the NPU -> decode + class-aware NMS -> invert
 the letterbox so boxes are back in 1280x720 -> publish as JSON on ``/latest``.
@@ -31,10 +35,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import signal
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
@@ -69,6 +75,72 @@ def _build_session(model_path: str, use_cpu: bool) -> ort.InferenceSession:
     sess = ort.InferenceSession(model_path, sess_options=so, providers=providers, provider_options=[{}])
     log.info("onnxruntime session ready: providers=%s", sess.get_providers())
     return sess
+
+
+def _ctx_stamp(src: Path) -> dict:
+    """Identity of the compile inputs, so a stale cache is never reused.
+
+    Ryzen AI 1.8's EPContext binary is tied to the toolchain that produced it;
+    loading one built by a different install fails a version check deep inside
+    the EP. Compare a stamp up front instead of relying on that to be graceful.
+    """
+    st = src.stat()
+    return {
+        "src_size": st.st_size,
+        "src_mtime_ns": st.st_mtime_ns,
+        "ort_version": ort.__version__,
+        "rai_version": os.environ.get("RAI_VERSION", ""),
+    }
+
+
+def _ensure_ep_context(model_path: str) -> str:
+    """Return a pre-compiled EPContext model path, compiling it once if needed.
+
+    On Ryzen AI 1.8 the VitisAI EP compiles the whole graph for
+    ``AMD_AIE2P_4x8_CMC_Overlay`` at session-creation time and keeps **nothing**
+    on disk (the 1.7.1-era ``cacheDir``/``cacheKey`` provider options are no-ops
+    now), so every launch paid ~25 s. Compiling once into an ONNX carrying an
+    EPContext node turns that into a ~0.7 s load, bit-identical outputs.
+
+    Falls back to the original model if compilation fails, so a broken cache can
+    never keep the sidecar from starting — it just starts slowly.
+    """
+    src = Path(model_path)
+    ctx = src.with_name(src.stem + "_ctx.onnx")
+    stamp_path = ctx.with_suffix(".json")
+    stamp = _ctx_stamp(src)
+
+    if ctx.is_file() and stamp_path.is_file():
+        try:
+            if json.loads(stamp_path.read_text()) == stamp:
+                log.info("using pre-compiled EPContext model %s", ctx.name)
+                return str(ctx)
+        except (OSError, ValueError):
+            pass
+        log.info("EPContext cache %s is stale; recompiling", ctx.name)
+
+    log.info("compiling %s for the NPU (one-time, ~30s) ...", src.name)
+    t0 = time.time()
+    tmp = ctx.with_name(ctx.name + ".tmp")
+    so = ort.SessionOptions()
+    so.log_severity_level = 3
+    so.add_session_config_entry("ep.context_enable", "1")
+    so.add_session_config_entry("ep.context_file_path", str(tmp))
+    so.add_session_config_entry("ep.context_embed_mode", "1")  # single self-contained file
+    try:
+        ort.InferenceSession(
+            str(src), sess_options=so, providers=["VitisAIExecutionProvider"], provider_options=[{}]
+        )
+        if not tmp.is_file():
+            raise RuntimeError(f"{tmp.name} was not produced")
+        tmp.replace(ctx)
+        stamp_path.write_text(json.dumps(stamp))
+    except Exception as e:  # noqa: BLE001
+        log.warning("EPContext compile failed (%s); falling back to %s", e, src.name)
+        tmp.unlink(missing_ok=True)
+        return str(src)
+    log.info("EPContext model written to %s in %.1fs", ctx.name, time.time() - t0)
+    return str(ctx)
 
 
 def _attach_shm(shm_name: str, stop: threading.Event) -> FrameSHM | None:
@@ -186,6 +258,11 @@ def main() -> int:
     ap.add_argument("--iou", type=float, default=0.45)
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--cpu", action="store_true", help="use CPU EP instead of NPU (debug)")
+    ap.add_argument(
+        "--no-ctx-cache",
+        action="store_true",
+        help="skip the pre-compiled EPContext model (recompile every launch)",
+    )
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -195,7 +272,8 @@ def main() -> int:
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
 
     log.info("loading model %s (cpu=%s)", args.model, args.cpu)
-    sess = _build_session(args.model, args.cpu)
+    model = args.model if (args.cpu or args.no_ctx_cache) else _ensure_ep_context(args.model)
+    sess = _build_session(model, args.cpu)
 
     log.info("attaching SHM %r ...", args.shm)
     shm = _attach_shm(args.shm, stop)

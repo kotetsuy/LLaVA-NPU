@@ -644,6 +644,54 @@ site-packages（`onnxruntime-vitisai 1.23.3`）は purge 済みの XRT 2.21 向�
 `8192` のままだと XRT が EAGAIN で死ぬので、その場で明示的に失敗して
 `~/ryzenai_1_8/fix_memlock.sh` を案内する（この設定は実行後に開いた端末にしか効かない）。
 
+### 9.6 サイドカー起動時間 25秒 → 0.7秒（EPContext モデル化, 2026-08-06）
+
+**症状.** 1.8 移行後、npu-yolo ウィンドウが bbox を出し始めるまで約 40 秒かかるようになった
+（1.7.1 では約 5 秒）。定常のスループットには影響なし。
+
+**計測.** `ort.InferenceSession(...)` と初回 `run()` を分けて計ると、全部セッション生成側で、
+ウォームアップ推論自体は 30ms しかかかっていない:
+
+```
+SESSION_INIT 24.76s providers=['VitisAIExecutionProvider', 'CPUExecutionProvider']
+WARMUP 0.03s
+  run0 32.8ms ...
+```
+
+EP のログを見ると理由は明白で、起動のたびに AIE のフルコンパイルが走っている
+（`Target architecture: AMD_AIE2P_4x8_CMC_Overlay`、`vaiml_compile_x2_v2 time: 8127 ms`、
+`PDI Swap times: 227`）。
+
+**原因.** コンパイル結果がディスクに一切残らない。`~/.cache/vaip` は生成されず、1.7.1 時代の
+`cacheDir` / `cacheKey` provider option を渡しても何も変わらない。1.8 のフロー
+（`EnableInMemoryMladfCompilePass`、`vaip_config.json` の `enable_cache_file_io_in_mem`）は
+コンパイル成果物をメモリ内に保持する方式で、再起動を安くしていた 1.7.1 の `vaip_cache/` に
+相当する仕組みが無くなっている。つまり毎回ゼロからの再コンパイルだった。
+
+**対処**（`scripts/npu_yolo_sidecar.py` の `_ensure_ep_context`）。ORT のセッション設定で、
+**EPContext** ノードを持つ ONNX に事前コンパイルして保存する:
+
+```python
+so.add_session_config_entry("ep.context_enable", "1")
+so.add_session_config_entry("ep.context_file_path", str(tmp))
+so.add_session_config_entry("ep.context_embed_mode", "1")  # 単一ファイルに埋め込む
+```
+
+元モデルの隣に `models/yolo11m_a16w8_ctx.onnx`（28 MB）が作られ、以降の起動はこれを読む。
+実機での計測:
+
+| | セッション生成 | 推論 | 出力 |
+|---|---|---|---|
+| `yolo11m_a16w8.onnx` | 24.6 秒 | 32.9 ms | — |
+| `yolo11m_a16w8_ctx.onnx` | **0.67 秒** | 32.9 ms | ビット一致（生の `(1,84,8400)` テンソルを `np.array_equal`） |
+
+キャッシュの陳腐化判定は EP 任せにせず、スタンプ（`models/yolo11m_a16w8_ctx.json`: 元モデルの
+サイズと mtime、`ort.__version__`、`RAI_VERSION`）で行う。EP 側のバージョンチェックは C++ の
+ロード奥深くで失敗するため。コンパイルは `*.tmp` に書いてから rename するので、中断しても
+壊れたキャッシュは残らない。何らかの理由でコンパイルに失敗した場合は警告を出して元モデルに
+フォールバックする（起動が遅くなるだけで、起動失敗にはならない）。`--no-ctx-cache` で無効化可。
+生成物は両方 gitignore 済み（モデルは既存の `*.onnx`、スタンプ用に `*_ctx.json` を追加）。
+
 ---
 
 ## 10. 関連ドキュメント

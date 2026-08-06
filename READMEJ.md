@@ -318,10 +318,15 @@ tmux attach -t llava    # Ctrl-b 0/1/2/3 = capture/serve/vlm/npu-yolo
 
 ### 運用上の注意（実装で判明した点）
 
-- **初回コンパイル ~20秒**: このリポジトリでの初回起動時、VitisAI が量子化モデルをコンパイルするため
-  最初の1推論に約20秒かかる。サイドカーは**ウォームアップ完了後に `/latest` を出す**設計なので、
-  serve 側は準備できるまで自然に待つ（bbox 空→準備後に出始める）。2回目以降は速い。
-  念のため `.gitignore` に `vaip_cache/` を追加済み。
+- **初回コンパイル ~25秒、2回目以降 ~0.7秒**: VitisAI はセッション生成時に量子化モデルを
+  `AMD_AIE2P_4x8_CMC_Overlay` 向けにコンパイルする。Ryzen AI 1.8 はその結果をディスクに残さない
+  （1.7.1 の `cacheDir`/`cacheKey` provider option は 1.8 では無効）ため、サイドカー側で一度だけ
+  `models/yolo11m_a16w8_ctx.onnx`（EPContext モデル）にコンパイルして保存し、以降の起動で再利用する。
+  セッション生成が約25秒→約0.7秒になり、出力はビット一致・推論時間も約33ms/回で変わらない。
+  元モデル・onnxruntime・Ryzen AI のバージョンが変わると自動で再生成される
+  （スタンプ: `models/yolo11m_a16w8_ctx.json`。どちらも gitignore 済み）。`--no-ctx-cache` で無効化可。
+  サイドカーは**ウォームアップ完了後に `/latest` を出す**設計なので、serve 側は準備できるまで
+  自然に待つ（bbox 空→準備後に出始める）。
 - **venv 分離は厳守**: サイドカーは RAI venv(`source scripts/rai_env.sh`)、serve は uv venv。
   `start_all.sh` はサイドカーのウィンドウにだけ RAI env を source し、ROCm 用 `ENV_PREFIX`
   (`ROCM_PATH` / `HIP_VISIBLE_DEVICES`) は付けない（NPU には不要）。
