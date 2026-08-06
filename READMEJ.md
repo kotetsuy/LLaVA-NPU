@@ -322,7 +322,7 @@ tmux attach -t llava    # Ctrl-b 0/1/2/3 = capture/serve/vlm/npu-yolo
   最初の1推論に約20秒かかる。サイドカーは**ウォームアップ完了後に `/latest` を出す**設計なので、
   serve 側は準備できるまで自然に待つ（bbox 空→準備後に出始める）。2回目以降は速い。
   念のため `.gitignore` に `vaip_cache/` を追加済み。
-- **venv 分離は厳守**: サイドカーは RAI venv(`source setup_ryzenai_env.sh`)、serve は uv venv。
+- **venv 分離は厳守**: サイドカーは RAI venv(`source scripts/rai_env.sh`)、serve は uv venv。
   `start_all.sh` はサイドカーのウィンドウにだけ RAI env を source し、ROCm 用 `ENV_PREFIX`
   (`ROCM_PATH` / `HIP_VISIBLE_DEVICES`) は付けない（NPU には不要）。
 - **サイドカーの起動コマンド**: RAI venv の python で、`PYTHONPATH=<repo>` を通して起動する
@@ -333,8 +333,17 @@ tmux attach -t llava    # Ctrl-b 0/1/2/3 = capture/serve/vlm/npu-yolo
 
 ### 実行時に必要なもの（`~/yolotest` フォルダは不要）
 
-- `~/ryzenai/ryzenai_venv`（onnxruntime-vitisai 1.23.3 / voe 1.7.1）+ XRT/NPU スタック
-- `models/yolo11m_a16w8.onnx`（コピー済み）
+- Ryzen AI のインストール。有効化は **`scripts/rai_env.sh`** を source する。以下を順に試す:
+  1. **1.8** = `~/ryzenai_1_8/venv`（onnxruntime 1.27.0、`VitisAIExecutionProvider` 入り）
+     + XRT 2.25.37 / NPU スタック。RAI 1.8 には `setup_ryzenai_env.sh` が同梱されていないため、
+     このスクリプトが環境構築を肩代わりする。
+  2. **1.7.1** = `~/ryzenai/ryzenai_venv/setup_ryzenai_env.sh`（onnxruntime-vitisai 1.23.3 /
+     voe 1.7.1 + XRT 2.21）。1.8 に上げず 1.7.1 を修理して使っているマシン向けの互換経路。
+
+  両方ある場合は 1.8 を優先する（1.8 に移行したマシンにも 1.7.1 のディレクトリは残っているが、
+  その venv はもう起動しないため）。`RAI18_VENV` / `RAI171_SETUP` で上書き可能。
+- `models/yolo11m_a16w8.onnx`（コピー済み）— 1.7.1 で作ったモデルは 1.8 でもそのまま読めて動く。
+  **アップグレード後の再量子化は不要**。
 - LLaVA の uv venv（npu 経路は `requests`=webrtc extra を使用）
 
 `~/yolotest` は**再量子化する時のみ**必要（下記）。通常運用では参照しない。モデルも前後処理コードも
@@ -343,7 +352,7 @@ tmux attach -t llava    # Ctrl-b 0/1/2/3 = capture/serve/vlm/npu-yolo
 #### 再量子化が要るとき（通常不要）
 A16W8 を作り直したい場合のみ:
 ```bash
-cd ~/ryzenai/ryzenai_venv && source setup_ryzenai_env.sh
+source ~/LLaVA-NPU/scripts/rai_env.sh
 python ~/yolotest/quantize_yolo11m_a16w8.py --input ~/yolo/yolo11m.onnx \
     --output ~/LLaVA-NPU/models/yolo11m_a16w8.onnx --calib-dir ~/yolotest/calib2
 ```

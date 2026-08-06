@@ -368,8 +368,8 @@ VLM(llama-server)と同じ「別プロセス + ローカルHTTP」パターン�
                            |  (http.server /latest, /health)     |  → /ws/bbox へ push(既存のまま)
 ```
 
-**なぜ別プロセスか**: NPU 実行には `onnxruntime-vitisai` + XRT の `LD_LIBRARY_PATH` が要り、これは
-`~/ryzenai/ryzenai_venv` にしか無い。LLaVA 本体の uv venv（torch-ROCm / ultralytics / fastapi）と
+**なぜ別プロセスか**: NPU 実行には VitisAI EP 入りの onnxruntime + XRT の `LD_LIBRARY_PATH` が要り、
+これは Ryzen AI venv（現在は `~/ryzenai_1_8/venv`。`scripts/rai_env.sh` で source する。§9.5 参照）にしか無い。LLaVA 本体の uv venv（torch-ROCm / ultralytics / fastapi）と
 統合すると依存衝突・環境汚染のリスクがある。よって VLM と同じくプロセス分離した。
 `src/capture/shm_writer.py` の `FrameSHM` が純 Python（numpy + `multiprocessing.shared_memory` のみ、
 torch 非依存）なので、RAI venv からも import して SHM を読めるのが成立の鍵。
@@ -577,6 +577,72 @@ npu-yolo  : VitisAIExecutionProvider セッション確立 / warmup 40ms
    `export` 一行が後々まで GPU 経路を静かに壊し続ける。そのため `start_all.sh` の
    `ENV_PREFIX` では export ではなく `unset` している
    （2026-07-26 変更・`RealtimeDepth` と同じ方針）。
+
+### 9.5 Ryzen AI 1.8 への移行（2026-08-06）
+
+1.7.1 の NPU スタックをアンインストールし（`~/ryzenai_1_8/uninstall_171.sh`: `xrt-npu` /
+`xrt_plugin-amdxdna` を purge、`/opt/xilinx` を削除）、**Ryzen AI 1.8 + XRT 2.25.37** に入れ替えた。
+その後 `./start_all.sh` は 4 ウィンドウ立ち上がるものの **npu-yolo だけ即死**した。
+モデル側には何の問題もなかった。
+
+| 症状 | 根本原因 | 対処 |
+|------|----------|------|
+| npu-yolo: `No module named 'encodings'` / `init_fs_encoding failed` | `start_all.sh` が今も `$HOME/ryzenai/ryzenai_venv/setup_ryzenai_env.sh` を source していた。ファイル自体は残っているが、背後の 1.7.1 venv にはもう起動可能なインタプリタが無い（かつ onnxruntime-vitisai 1.23.3 は purge 済み XRT 2.21 向けビルド） | `RAI_ENV` を新設の **`scripts/rai_env.sh`**（`~/ryzenai_1_8/venv` を有効化）に向ける |
+
+**A16W8 ONNX の作り直しは不要だった。** 1.7.1 で量子化した `models/yolo11m_a16w8.onnx` は
+1.8 でもそのまま読めて動くことを実測で確認済み:
+
+```bash
+source scripts/rai_env.sh
+python ~/yolotest/decode_detect.py --model models/yolo11m_a16w8.onnx \
+    --image ~/yolotest/calib_images/bus.jpg
+#  providers: ['VitisAIExecutionProvider', 'CPUExecutionProvider']
+#  person x4: [0.89, 0.89, 0.89, 0.75]
+#  bus x1:    [0.87]                      ← 1.7.1 当時の基準結果と完全一致
+```
+1.8 の ORT は **1.27.0**（旧 1.23.3.dev）。VitisAI のコンパイル対象は
+`AMD_AIE2P_4x8_CMC_Overlay`、初回セッションのコンパイル約 28 秒、定常の推論は約 37ms。
+
+**なぜ同じコミットが別の 395 マシンでは動いたのか。** git の中身に差は無い。差があるのは、
+どちらのリポジトリも追跡していないマシン側の状態（`ryzenai_1_8/.gitignore` は `venv/` を除外、
+XRT は apt パッケージ、`/opt/xilinx` は OS 側）。`start_all.sh` は **1.7.1** のインストール先を
+ハードコードしていたが、このマシンではその 1.7.1 環境が二重に死んでいた
+（`dpkg.log` と `/var/log/dist-upgrade/main.log` より）:
+
+| 日付 | 出来事 |
+|------|--------|
+| 2026-07-21 | XRT を **2.21.75** に更新。10:38 に `/usr/bin/python3.12 -m venv --copies` で venv 作成、10:56 に A16W8 ONNX 生成 — この時点では NPU 経路は動いていた |
+| **2026-08-05 15:12–15:38** | Ubuntu **24.04 → 26.04** の release upgrade。この中で `python3.12` / `libpython3.12t64` / `python3.12-venv` が **削除**され(15:36)、`/usr/lib/python3.12` が消滅 → `--copies` のインタプリタが stdlib を失う。同時に **XRT 2.21.75 も削除** |
+| 2026-08-06 | Ryzen AI 1.8 を導入 → XRT **2.25.37** + `~/ryzenai_1_8/venv` |
+
+つまり §9.3 問題 B と同じ手順でインタプリタを直しても、ここでは足りなかった。1.7.1 の
+site-packages（`onnxruntime-vitisai 1.23.3`）は purge 済みの XRT 2.21 向けビルドだからである。
+向こうのマシンは §9.3 のルート（1.7.1 を修理し XRT 2.21 のまま）を採ったのでハードコードされた
+パスが有効なまま、こちらはスタックごと入れ替えた — これが分岐点。
+
+1 つのコミットで両方のマシンを動かすため、`scripts/rai_env.sh` は **1.8 を優先し、無ければ
+1.7.1 にフォールバック**する（場所は `RAI18_VENV` / `RAI171_SETUP` で上書き可、選ばれた版は
+`RAI_VERSION` として export。`start_all.sh` は起動前にサブシェルで実行して、どちらを使うか表示する）。
+両方ある場合に 1.8 を優先するのは、1.8 に移行したマシンにも 1.7.1 のディレクトリと setup
+スクリプトが残っており、**ファイルの存在は 1.7.1 が動く証拠にならない**ため。加えて 1.7.1 経路では
+先に `venv/bin/python` の起動を試し、死んでいる場合は明示的に報告する（サイドカーが
+`No module named 'encodings'` で落ちるのを待たない）。
+
+`scripts/rai_env.sh` が 1.8 の環境を手で組み立てているのは、**RAI 1.8 に `setup_ryzenai_env.sh` が
+同梱されていない**ため。中身は `~/ryzenai_1_8/run_quicktest.sh` と同じ構成で、見落としやすい
+2 つの回避策を含む:
+
+1. `libonnxruntime_vitisai_ep.so` が `libpeano-lib.so.21.0git` を NEED するが、これは
+   `site-packages/lnx64.o/tools/peano/lib` にしか無く、公式手順の `LD_LIBRARY_PATH` に含まれない。
+   通さないと EP が**エラーも出さず CPU にフォールバック**する（NPU が使われない）。
+2. venv の `activate` が `voe/lib` を `/opt/xilinx/xrt/lib` より前に置き、`voe/lib` には古い
+   `libxrt_coreutil.so.2.19.184` が入っている。これを掴むと XRT 2.25.37 の `libxrt_core.so.2` が
+   `undefined symbol: xrt_core::smi::get_option_options` で失敗 →「Failed to create runner」→ abort。
+   インストール済み XRT のライブラリを必ず先頭にする。
+
+あわせて `start_all.sh` の npu 経路に **memlock の事前チェック**を追加した。`ulimit -H -l` が
+`8192` のままだと XRT が EAGAIN で死ぬので、その場で明示的に失敗して
+`~/ryzenai_1_8/fix_memlock.sh` を案内する（この設定は実行後に開いた端末にしか効かない）。
 
 ---
 

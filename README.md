@@ -325,7 +325,7 @@ plus "boxes in the right place in the browser".)
   serving `/latest` **after warmup completes**, so serve simply waits (bbox is empty, then
   starts appearing). Subsequent runs are fast. `vaip_cache/` is added to `.gitignore` just in case.
 - **Keep the venvs separate**: the sidecar runs under the RAI venv
-  (`source setup_ryzenai_env.sh`); serve runs under the uv venv. `start_all.sh` sources the
+  (`source scripts/rai_env.sh`); serve runs under the uv venv. `start_all.sh` sources the
   RAI env only in the sidecar window and does **not** apply the ROCm `ENV_PREFIX`
   (`ROCM_PATH` / `HIP_VISIBLE_DEVICES` — the NPU doesn't need them).
 - **Sidecar launch command**: it runs under the RAI venv's python with `PYTHONPATH=<repo>`
@@ -336,8 +336,18 @@ plus "boxes in the right place in the browser".)
 
 ### What you need at runtime (the `~/yolotest` folder is not required)
 
-- `~/ryzenai/ryzenai_venv` (onnxruntime-vitisai 1.23.3 / voe 1.7.1) + the XRT/NPU stack
-- `models/yolo11m_a16w8.onnx` (already copied in)
+- A Ryzen AI installation, activated by **`scripts/rai_env.sh`**. It tries, in order:
+  1. **1.8** at `~/ryzenai_1_8/venv` (onnxruntime 1.27.0 with `VitisAIExecutionProvider`) +
+     the XRT 2.25.37 / NPU stack. RAI 1.8 ships no `setup_ryzenai_env.sh`, so the script
+     reproduces the environment itself.
+  2. **1.7.1** via `~/ryzenai/ryzenai_venv/setup_ryzenai_env.sh` (onnxruntime-vitisai 1.23.3 /
+     voe 1.7.1 + XRT 2.21) — kept so machines that repaired 1.7.1 instead of upgrading keep
+     working.
+
+  1.8 wins when both are present: an upgraded machine still has the 1.7.1 directory lying
+  around, but the venv behind it is dead. Override with `RAI18_VENV` / `RAI171_SETUP`.
+- `models/yolo11m_a16w8.onnx` (already copied in) — the model produced under 1.7.1 loads and
+  runs unchanged on 1.8; **no re-quantization is needed after the upgrade**.
 - LLaVA's uv venv (the npu path uses `requests` = the webrtc extra)
 
 `~/yolotest` is needed **only when re-quantizing** (below); normal operation never touches it.
@@ -347,7 +357,7 @@ self-contained.
 #### When you need to re-quantize (normally unnecessary)
 Only if you want to rebuild the A16W8 model:
 ```bash
-cd ~/ryzenai/ryzenai_venv && source setup_ryzenai_env.sh
+source ~/LLaVA-NPU/scripts/rai_env.sh
 python ~/yolotest/quantize_yolo11m_a16w8.py --input ~/yolo/yolo11m.onnx \
     --output ~/LLaVA-NPU/models/yolo11m_a16w8.onnx --calib-dir ~/yolotest/calib2
 ```

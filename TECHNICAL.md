@@ -370,8 +370,9 @@ isolated in its own process (the sidecar); the serve process merely polls its HT
                            |  (http.server /latest, /health)     |  → push to /ws/bbox (unchanged)
 ```
 
-**Why a separate process**: NPU execution needs `onnxruntime-vitisai` + XRT's
-`LD_LIBRARY_PATH`, which only exist in `~/ryzenai/ryzenai_venv`. Merging that with LLaVA's
+**Why a separate process**: NPU execution needs the VitisAI EP's onnxruntime + XRT's
+`LD_LIBRARY_PATH`, which only exist in the Ryzen AI venv (now `~/ryzenai_1_8/venv`, sourced via
+`scripts/rai_env.sh` — see §9.5). Merging that with LLaVA's
 own uv venv (torch-ROCm / ultralytics / fastapi) risks dependency conflicts and environment
 pollution, so — like the VLM — we split it into its own process. The enabler is that
 `FrameSHM` in `src/capture/shm_writer.py` is pure Python (only numpy +
@@ -587,6 +588,72 @@ npu-yolo  : VitisAIExecutionProvider session established / warmup 40ms
    comes from the environment, a single stray `export` in `~/.bashrc` silently breaks the GPU
    path long after the fact. `start_all.sh` therefore `unset`s it in `ENV_PREFIX` rather than
    exporting anything (changed 2026-07-26; matches the `RealtimeDepth` setup).
+
+### 9.5 Migration to Ryzen AI 1.8 (2026-08-06)
+
+The 1.7.1 NPU stack was uninstalled (`~/ryzenai_1_8/uninstall_171.sh`: purged `xrt-npu` /
+`xrt_plugin-amdxdna` and removed `/opt/xilinx`) and replaced by **Ryzen AI 1.8 + XRT 2.25.37**.
+After that, `./start_all.sh` still came up with 4 windows but the **npu-yolo window died
+immediately** — nothing about the model was wrong:
+
+| Symptom | Root cause | Fix |
+|---------|------------|-----|
+| npu-yolo: `No module named 'encodings'` / `init_fs_encoding failed` | `start_all.sh` still sourced `$HOME/ryzenai/ryzenai_venv/setup_ryzenai_env.sh`. The file survives, but the 1.7.1 venv behind it no longer has a usable interpreter (and its onnxruntime-vitisai 1.23.3 was built against the now-purged XRT 2.21) | Point `RAI_ENV` at the new **`scripts/rai_env.sh`**, which activates `~/ryzenai_1_8/venv` |
+
+**The A16W8 ONNX did not need to be rebuilt.** `models/yolo11m_a16w8.onnx`, quantized under
+1.7.1, loads and runs unchanged on 1.8 — verified directly:
+
+```bash
+source scripts/rai_env.sh
+python ~/yolotest/decode_detect.py --model models/yolo11m_a16w8.onnx \
+    --image ~/yolotest/calib_images/bus.jpg
+#  providers: ['VitisAIExecutionProvider', 'CPUExecutionProvider']
+#  person x4: [0.89, 0.89, 0.89, 0.75]
+#  bus x1:    [0.87]                      ← identical to the 1.7.1 reference result
+```
+ORT is **1.27.0** on 1.8 (was 1.23.3.dev), the VitisAI compile targets
+`AMD_AIE2P_4x8_CMC_Overlay`, first-session compile is ~28 s and steady-state inference ~37 ms.
+
+**Why the same commit worked on the other 395 machine.** Nothing in git differed — what
+differed is machine-local state that neither repo tracks (`ryzenai_1_8/.gitignore` excludes
+`venv/`; XRT is an apt package; `/opt/xilinx` belongs to the OS). `start_all.sh` hardcoded the
+**1.7.1** install path, and on this machine that install died twice over, per `dpkg.log` and
+`/var/log/dist-upgrade/main.log`:
+
+| Date | Event |
+|------|-------|
+| 2026-07-21 | XRT upgraded to **2.21.75**; venv built 10:38 by `/usr/bin/python3.12 -m venv --copies`; A16W8 ONNX produced 10:56 — the NPU path worked at this point |
+| **2026-08-05 15:12–15:38** | Ubuntu **24.04 → 26.04** release upgrade. It **removed `python3.12` / `libpython3.12t64` / `python3.12-venv`** (15:36) → `/usr/lib/python3.12` gone → the `--copies` interpreter lost its stdlib. It also **removed XRT 2.21.75** |
+| 2026-08-06 | Ryzen AI 1.8 installed → XRT **2.25.37** + `~/ryzenai_1_8/venv` |
+
+So repairing the interpreter the way §9.3 problem B did would *not* have been enough here — the
+1.7.1 site-packages (`onnxruntime-vitisai 1.23.3`) are built against the now-purged XRT 2.21.
+The other machine took the §9.3 route (repair 1.7.1, keep XRT 2.21) and the hardcoded path
+stayed valid there; this one replaced the stack instead.
+
+To keep both machines working from one commit, `scripts/rai_env.sh` **tries 1.8 first and falls
+back to 1.7.1** (`RAI18_VENV` / `RAI171_SETUP` override the locations; `RAI_VERSION` is exported;
+`start_all.sh` runs it in a subshell as a preflight and prints which one it picked). 1.8 wins
+when both are present, because an upgraded machine still has the 1.7.1 directory and its setup
+script — file existence is *not* evidence that 1.7.1 works. The 1.7.1 branch therefore also
+test-boots `venv/bin/python` first and reports the dead-interpreter case explicitly rather than
+letting the sidecar die on `No module named 'encodings'`.
+
+`scripts/rai_env.sh` has to construct the 1.8 environment by hand because **RAI 1.8 ships no
+`setup_ryzenai_env.sh`**. It mirrors `~/ryzenai_1_8/run_quicktest.sh`, including two packaging
+workarounds that are easy to miss:
+
+1. `libonnxruntime_vitisai_ep.so` NEEDs `libpeano-lib.so.21.0git`, which ships only under
+   `site-packages/lnx64.o/tools/peano/lib` — not on the documented `LD_LIBRARY_PATH`. Without
+   it the EP **silently falls back to CPU** (no error, just no NPU).
+2. The venv's `activate` puts `voe/lib` ahead of `/opt/xilinx/xrt/lib`, and `voe/lib` ships a
+   stale `libxrt_coreutil.so.2.19.184`. Loading it makes XRT 2.25.37's `libxrt_core.so.2` fail
+   with `undefined symbol: xrt_core::smi::get_option_options` → "Failed to create runner" →
+   abort. The installed XRT libs must come first.
+
+`start_all.sh` also gained a **memlock preflight** for the npu path: if `ulimit -H -l` is still
+`8192`, XRT dies with EAGAIN, so it now fails loudly and points at
+`~/ryzenai_1_8/fix_memlock.sh` (whose effect only applies to terminals opened afterwards).
 
 ---
 

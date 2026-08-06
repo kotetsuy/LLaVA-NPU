@@ -2,15 +2,15 @@
 """NPU YOLO11m sidecar — runs object detection on the AMD XDNA2 NPU.
 
 This process is the NPU counterpart of ``src/inference/yolo_worker.py`` (which
-runs Ultralytics on the GPU). It must run under the **Ryzen AI venv**, which is
-the only environment that has ``onnxruntime-vitisai`` + XRT:
+runs Ultralytics on the GPU). It must run under the **Ryzen AI 1.8 venv**, which
+is the only environment that has the VitisAI EP + XRT:
 
-    source ~/ryzenai/ryzenai_venv/setup_ryzenai_env.sh
+    source ~/LLaVA-NPU/scripts/rai_env.sh
     PYTHONPATH=~/LLaVA-NPU python ~/LLaVA-NPU/scripts/npu_yolo_sidecar.py \
         --model models/yolo11m_a16w8.onnx --port 8082
 
 Why a separate process (not a thread in ``serve``): the NPU stack needs
-onnxruntime-vitisai and XRT's ``LD_LIBRARY_PATH``, which conflict with the
+the VitisAI EP's onnxruntime and XRT's ``LD_LIBRARY_PATH``, which conflict with the
 torch-ROCm / ultralytics venv the FastAPI server runs in. So we mirror the VLM
 architecture: a standalone worker that ``serve`` talks to over loopback HTTP.
 

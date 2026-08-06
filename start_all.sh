@@ -23,8 +23,11 @@ URL="http://localhost:8080/"
 SERVER_TIMEOUT=30  # seconds to wait for the server before opening the browser
 
 # NPU YOLO sidecar (only started when config.yaml yolo.backend == npu). It runs
-# under the Ryzen AI venv, which is the only env with onnxruntime-vitisai + XRT.
-RAI_ENV="$HOME/ryzenai/ryzenai_venv/setup_ryzenai_env.sh"
+# under the Ryzen AI venv, which is the only env with the VitisAI EP + XRT.
+# The RAI install path differs per machine (1.8 lives in ~/ryzenai_1_8 and ships
+# no setup script; 1.7.1 had its own), so we source our own rai_env.sh, which
+# picks whichever of the two is actually installed and working.
+RAI_ENV="$PROJECT_DIR/scripts/rai_env.sh"
 
 # CLI options
 OPEN_BROWSER=1
@@ -80,13 +83,29 @@ read -r YOLO_BACKEND NPU_ONNX NPU_PORT <<< "$CONFIG_LINE"
 
 if [[ "$YOLO_BACKEND" == "npu" ]]; then
     if [[ ! -f "$RAI_ENV" ]]; then
-        echo "ERROR: yolo.backend=npu but Ryzen AI env not found at $RAI_ENV" >&2
+        echo "ERROR: yolo.backend=npu but Ryzen AI env script not found at $RAI_ENV" >&2
         echo "       Set yolo.backend: gpu in config.yaml to use the GPU path instead." >&2
         exit 1
     fi
+    # rai_env.sh picks Ryzen AI 1.8 or falls back to 1.7.1, and prints its own
+    # diagnosis to stderr if neither is usable. Run it in a subshell here so we
+    # fail before tmux starts, instead of leaving a dead npu-yolo window behind.
+    if ! RAI_VERSION="$(bash -c 'source "$1" >/dev/null && printf "%s" "$RAI_VERSION"' _ "$RAI_ENV")"; then
+        echo "ERROR: yolo.backend=npu but no usable Ryzen AI environment (see above)." >&2
+        exit 1
+    fi
+    echo "NPU sidecar will use Ryzen AI $RAI_VERSION."
     if [[ ! -f "$PROJECT_DIR/$NPU_ONNX" ]]; then
         echo "ERROR: NPU model not found at $PROJECT_DIR/$NPU_ONNX" >&2
         echo "       Copy it: cp ~/yolotest/yolo11m_a16w8.onnx $PROJECT_DIR/models/" >&2
+        exit 1
+    fi
+    # XRT allocates pinned buffers; with the stock 8 MB memlock limit every NPU
+    # run dies with EAGAIN. ~/ryzenai_1_8/fix_memlock.sh raises it, but only for
+    # terminals opened afterwards — so fail loudly here instead of in the sidecar.
+    if [[ "$(ulimit -H -l)" == "8192" ]]; then
+        echo "ERROR: memlock hard limit is still 8192 KB — XRT will fail with EAGAIN." >&2
+        echo "       Run 'bash ~/ryzenai_1_8/fix_memlock.sh', then open a NEW terminal." >&2
         exit 1
     fi
 fi
@@ -119,7 +138,7 @@ tmux send-keys -t "$SESSION:vlm" "${ENV_PREFIX}${LLAMA_BIN} \
   -c 8192 -ngl 99 --port 8081 --host 127.0.0.1 --reasoning off" C-m
 
 # npu-yolo (only for backend: npu). Runs under the Ryzen AI venv — do NOT apply
-# ENV_PREFIX (ROCM_PATH etc. are for the GPU); setup_ryzenai_env.sh sets XRT.
+# ENV_PREFIX (ROCM_PATH etc. are for the GPU); scripts/rai_env.sh sets XRT.
 # PYTHONPATH lets the sidecar import src.capture.shm_writer (pure-python SHM).
 WINDOWS_MSG="3 windows: capture, serve, vlm"
 SWITCH_MSG="Ctrl-b 0 (capture), Ctrl-b 1 (serve), Ctrl-b 2 (vlm)"
