@@ -16,9 +16,6 @@ SESSION=llava
 # runs against the checkout that contains this start_all.sh (this repo has the
 # NPU sidecar + config.yaml; the older ~/LLaVA does not).
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LLAMA_BIN="$HOME/llama.cpp/build/bin/llama-server"
-VLM_MODEL="$HOME/nemotron-3/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf"
-VLM_MMPROJ="$HOME/nemotron-3/mmproj-F16.gguf"
 URL="http://localhost:8080/"
 SERVER_TIMEOUT=30  # seconds to wait for the server before opening the browser
 
@@ -57,6 +54,44 @@ if [[ ! -d "$PROJECT_DIR" ]]; then
     echo "ERROR: project dir not found: $PROJECT_DIR" >&2
     exit 1
 fi
+
+# Sync once before any process starts; concurrent uv run commands can remove
+# optional server dependencies from the shared environment.
+cd "$PROJECT_DIR"
+uv sync --locked --inexact --extra webrtc
+
+# Use the same config as capture/serve, including this host's model locations.
+# shlex.quote makes the generated shell assignments safe for paths with spaces.
+CONFIG_VARS="$(uv run --no-sync python - <<'PY'
+from pathlib import Path
+from urllib.parse import urlsplit
+import shlex
+import yaml
+
+cfg = yaml.safe_load(Path('config.yaml').read_text())
+v = cfg['vlm']
+y = cfg['yolo']
+n = y.get('npu', {})
+endpoint = urlsplit(v['server']['base_url'])
+values = {
+    'LLAMA_BIN': str(Path(v['binary']).expanduser().with_name('llama-server').resolve()),
+    'VLM_MODEL': str(Path(v['model']).expanduser().resolve()),
+    'VLM_MMPROJ': str(Path(v['mmproj']).expanduser().resolve()),
+    'VLM_CTX': int(v.get('ctx_size', 8192)),
+    'VLM_NGL': int(v.get('ngl', 99)),
+    'VLM_PORT': endpoint.port or 8081,
+    'VLM_HOST': endpoint.hostname or '127.0.0.1',
+    'YOLO_BACKEND': y.get('backend', 'gpu'),
+    'NPU_ONNX': str(Path(n.get('onnx', 'models/yolo11m_a16w8.onnx')).expanduser().resolve()),
+    'NPU_PORT': int(n.get('port', 8082)),
+    'URL': f"http://localhost:{cfg['server']['port']}/",
+}
+for key, value in values.items():
+    print(f'{key}={shlex.quote(str(value))}')
+PY
+)"
+eval "$CONFIG_VARS"
+
 if [[ ! -x "$LLAMA_BIN" ]]; then
     echo "ERROR: llama-server not found at $LLAMA_BIN" >&2
     exit 1
@@ -69,17 +104,6 @@ if [[ ! -f "$VLM_MMPROJ" ]]; then
     echo "ERROR: mmproj not found at $VLM_MMPROJ" >&2
     exit 1
 fi
-
-# Read the YOLO backend + NPU settings from config.yaml (pyyaml is a core dep,
-# so `uv run` always has it). Defaults keep us on the GPU path if parsing fails.
-CONFIG_LINE="$(cd "$PROJECT_DIR" && uv run python -c '
-import yaml
-y = yaml.safe_load(open("config.yaml")).get("yolo", {})
-npu = y.get("npu", {})
-print(y.get("backend", "gpu"), npu.get("onnx", "models/yolo11m_a16w8.onnx"), npu.get("port", 8082))
-' 2>/dev/null)"
-[[ -z "$CONFIG_LINE" ]] && CONFIG_LINE="gpu - -"
-read -r YOLO_BACKEND NPU_ONNX NPU_PORT <<< "$CONFIG_LINE"
 
 if [[ "$YOLO_BACKEND" == "npu" ]]; then
     if [[ ! -f "$RAI_ENV" ]]; then
@@ -95,8 +119,8 @@ if [[ "$YOLO_BACKEND" == "npu" ]]; then
         exit 1
     fi
     echo "NPU sidecar will use Ryzen AI $RAI_VERSION."
-    if [[ ! -f "$PROJECT_DIR/$NPU_ONNX" ]]; then
-        echo "ERROR: NPU model not found at $PROJECT_DIR/$NPU_ONNX" >&2
+    if [[ ! -f "$NPU_ONNX" ]]; then
+        echo "ERROR: NPU model not found at $NPU_ONNX" >&2
         echo "       Copy it: cp ~/yolotest/yolo11m_a16w8.onnx $PROJECT_DIR/models/" >&2
         exit 1
     fi
@@ -118,7 +142,7 @@ fi
 
 # capture
 tmux new-session -d -s "$SESSION" -n capture -c "$PROJECT_DIR"
-tmux send-keys -t "$SESSION:capture" "${ENV_PREFIX}uv run capture-run" C-m
+tmux send-keys -t "$SESSION:capture" "${ENV_PREFIX}uv run --no-sync capture-run" C-m
 
 # Give capture ~1s head-start so SHM is ready before yolo/vlm start probing.
 sleep 1
@@ -127,7 +151,7 @@ sleep 1
 # fastapi/aiortc/uvicorn/requests — `uv run` without it syncs the env down to the
 # base deps and serve dies with ModuleNotFoundError: fastapi.
 tmux new-window -t "$SESSION:" -n serve -c "$PROJECT_DIR"
-tmux send-keys -t "$SESSION:serve" "${ENV_PREFIX}uv run --extra webrtc serve" C-m
+tmux send-keys -t "$SESSION:serve" "${ENV_PREFIX}uv run --no-sync serve" C-m
 
 # llama-server (multimodal Nemotron). --reasoning off is required:
 # without it the *-Reasoning model spends n_predict on thinking tokens.
@@ -135,7 +159,7 @@ tmux new-window -t "$SESSION:" -n vlm -c "$PROJECT_DIR"
 tmux send-keys -t "$SESSION:vlm" "${ENV_PREFIX}${LLAMA_BIN} \
   -m '$VLM_MODEL' \
   --mmproj '$VLM_MMPROJ' \
-  -c 8192 -ngl 99 --port 8081 --host 127.0.0.1 --reasoning off" C-m
+  -c '$VLM_CTX' -ngl '$VLM_NGL' -np 1 --port '$VLM_PORT' --host '$VLM_HOST' --reasoning off" C-m
 
 # npu-yolo (only for backend: npu). Runs under the Ryzen AI venv — do NOT apply
 # ENV_PREFIX (ROCM_PATH etc. are for the GPU); scripts/rai_env.sh sets XRT.

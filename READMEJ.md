@@ -1,5 +1,9 @@
 # LLaVA on ROCm — USB カメラ × YOLO11m × Nemotron Nano Omni × Chrome MJPEG
 
+> `hx370-gfx1150` ブランチの **Ryzen AI 9 HX 370 / Radeon 890M / ROCm 10**
+> での起動手順・検証結果は [HX370_ROCM10.md](./HX370_ROCM10.md) を参照。
+> 以下のNucBox EVO X2向け手順とは、モデル配置とROCmの導入済み環境が異なります。
+
 NucBox EVO X2 (Ryzen AI MAX+ 395 / Radeon 8060S, ROCm 7.2.1) 上で USB カメラ映像を Chrome ブラウザに MJPEG (`multipart/x-mixed-replace`) で配信し、同じ映像に対して YOLO11m の物体検出 (30fps) と Nemotron Nano Omni による日本語キャプション (0.5fps) をリアルタイムオーバーレイするデモ。
 
 > **転送経路について**: もともと WebRTC (aiortc) を使っていましたが、完全オフライン環境 (Wi-Fi OFF / インターネット非接続) では Chrome が ICE host candidate を 1 件も emit しなくなり接続不能になる事象があったため、ICE を必要としない MJPEG over HTTP に移行しました。LAN 越し配信も plain HTTP なのでそのまま動作します。

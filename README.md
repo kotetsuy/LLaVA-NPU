@@ -1,5 +1,9 @@
 # LLaVA on ROCm — USB camera × YOLO11m × Nemotron Nano Omni × Chrome MJPEG
 
+> For the `hx370-gfx1150` branch on **Ryzen AI 9 HX 370 / Radeon 890M / ROCm 10**,
+> see [HX370_ROCM10.md](./HX370_ROCM10.md) (Japanese) for the verified setup,
+> model locations, and runtime results. The original EVO X2 instructions follow.
+
 A demo that runs on the NucBox EVO X2 (Ryzen AI MAX+ 395 / Radeon 8060S, ROCm 7.2.1): live USB-camera video is streamed to Chrome over MJPEG (`multipart/x-mixed-replace`), with real-time YOLO11m bbox overlay (30 fps) and Japanese captions from Nemotron Nano Omni (0.5 fps).
 
 > **Note on transport**: this used to be a WebRTC (aiortc) demo, but on fully-offline networks (Wi-Fi off / no Internet) Chrome refuses to emit a single ICE host candidate, leaving the connection stuck. We migrated to MJPEG over HTTP, which needs no ICE at all and works on the LAN unchanged.

@@ -48,7 +48,7 @@ yolo:
   # モデル・XRT 環境はサイドカー側 (RAI venv) が持つ。serve はこの URL を polling するだけ。
   # サイドカーの起動は start_all.sh が別 tmux ウィンドウで行う。
   npu:
-    onnx: models/yolo11m_a16w8.onnx      # サイドカーに渡す量子化済みモデル
+    onnx: /home/test/yolotest/yolo11m_a16w8.onnx  # このHX370で検証済みのA16W8モデル
     sidecar_url: http://127.0.0.1:8082   # serve が bbox を取りに行く先
     port: 8082                           # サイドカーの待受ポート
     poll_hz: 60                          # serve 側の /latest ポーリング周波数
@@ -67,9 +67,9 @@ server:
 vlm:
   # NVIDIA Nemotron-3 Nano Omni 30B-A3B (Reasoning, Q4_K_XL)
   # Step 4 (subprocess) の互換用にバイナリ・モデルパスは残す
-  binary: /home/araki/llama.cpp/build/bin/llama-mtmd-cli
-  model: /home/araki/nemotron-3/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf
-  mmproj: /home/araki/nemotron-3/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF/mmproj-F16.gguf
+  binary: /home/test/llama.cpp/build/bin/llama-mtmd-cli
+  model: /home/test/nemotron-3/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf
+  mmproj: /home/test/nemotron-3/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF/mmproj-F16.gguf
   # 出力言語を強制するため system / user の二段構え。
   # locale が en の環境でも英語に流されないよう、両方で日本語を明示する。
   system_prompt: "あなたは必ず日本語のみで応答する画像説明アシスタントです。英語や他の言語、ローマ字、英単語の混在を一切禁止します。出力は常に日本語の文字（ひらがな・カタカナ・漢字）と日本語の句読点のみで構成してください。"
@@ -85,4 +85,3 @@ vlm:
     base_url: http://127.0.0.1:8081
     cadence_sec: 2.0       # キャプション間隔 (HANDOFF: 0.5fps)
     jpeg_quality: 90       # SHM frame -> JPEG -> base64 -> server
-
