@@ -35,12 +35,28 @@ capture:
   open_retry_sec: 1.0
 
 yolo:
-  model: yolo11m.pt        # ultralytics が初回 predict 時に自動ダウンロード
-  device: cuda             # ROCm の HIP 層が CUDA API を翻訳するので "cuda" のまま
-  imgsz: 640               # HANDOFF 4.3: Ultralytics が内部で letterbox + 逆変換
+  # backend: 推論をどこで回すか。
+  #   npu = AMD XDNA2 NPU (VitisAI EP, 別プロセス npu_yolo_sidecar が担当)。
+  #   gpu = Ultralytics を GPU(ROCm) で serve プロセス内実行 (従来経路)。
+  # NPU が不調なら gpu に戻すだけで即ロールバックできる。
+  backend: npu
+  imgsz: 640               # HANDOFF 4.3: 640 入力 (両バックエンド共通)
   conf: 0.25
   iou: 0.45
-  half: true              # fp16。fp32 で 30fps が出れば false のままで OK
+
+  # --- npu バックエンド用 ---
+  # モデル・XRT 環境はサイドカー側 (RAI venv) が持つ。serve はこの URL を polling するだけ。
+  # サイドカーの起動は start_all.sh が別 tmux ウィンドウで行う。
+  npu:
+    onnx: models/yolo11m_a16w8.onnx      # サイドカーに渡す量子化済みモデル
+    sidecar_url: http://127.0.0.1:8082   # serve が bbox を取りに行く先
+    port: 8082                           # サイドカーの待受ポート
+    poll_hz: 60                          # serve 側の /latest ポーリング周波数
+
+  # --- gpu バックエンド用 (backend: gpu のとき使用) ---
+  model: yolo11m.pt        # ultralytics が初回 predict 時に自動ダウンロード
+  device: cuda             # ROCm の HIP 層が CUDA API を翻訳するので "cuda" のまま
+  half: true               # fp16。fp32 で 30fps が出れば false のままで OK
 
 server:
   host: 0.0.0.0    # LAN 内の他デバイス (スマホ/別PC) からも開きたいので 0.0.0.0

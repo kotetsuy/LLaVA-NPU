@@ -233,6 +233,13 @@ __marimo__/
 *.onnx
 *.safetensors
 
+# VitisAI / NPU compilation cache (regenerated on first inference).
+# *_ctx.onnx is covered by *.onnx above; *_ctx.json is its staleness stamp.
+vaip_cache/
+.vaip*
+*.xclbin
+*_ctx.json
+
 # Claude
 .claude/
 CHANGES.md

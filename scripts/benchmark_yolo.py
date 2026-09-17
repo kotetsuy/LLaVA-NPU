@@ -14,8 +14,9 @@ Examples::
     # fp16 sweep
     uv run benchmark-yolo --half
 
-ROCm note: if device='cuda' fails, make sure HSA_OVERRIDE_GFX_VERSION=11.5.0
-is exported and HIP_VISIBLE_DEVICES=0 (or unset). See CLAUDE.md.
+ROCm note: if device='cuda' fails, make sure HSA_OVERRIDE_GFX_VERSION is *not*
+exported (the wheels are native gfx1150 builds — overriding the arch breaks
+them) and that HIP_VISIBLE_DEVICES=0 (or unset). See CLAUDE.md.
 """
 
 from __future__ import annotations

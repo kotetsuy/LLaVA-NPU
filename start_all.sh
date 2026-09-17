@@ -12,12 +12,22 @@
 set -euo pipefail
 
 SESSION=llava
-PROJECT_DIR="$HOME/LLaVA"
+# Resolve the repo root from this script's own location so the pipeline always
+# runs against the checkout that contains this start_all.sh (this repo has the
+# NPU sidecar + config.yaml; the older ~/LLaVA does not).
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLAMA_BIN="$HOME/llama.cpp/build/bin/llama-server"
 VLM_MODEL="$HOME/nemotron-3/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf"
 VLM_MMPROJ="$HOME/nemotron-3/mmproj-F16.gguf"
 URL="http://localhost:8080/"
 SERVER_TIMEOUT=30  # seconds to wait for the server before opening the browser
+
+# NPU YOLO sidecar (only started when config.yaml yolo.backend == npu). It runs
+# under the Ryzen AI venv, which is the only env with the VitisAI EP + XRT.
+# The RAI install path differs per machine (1.8 lives in ~/ryzenai_1_8 and ships
+# no setup script; 1.7.1 had its own), so we source our own rai_env.sh, which
+# picks whichever of the two is actually installed and working.
+RAI_ENV="$PROJECT_DIR/scripts/rai_env.sh"
 
 # CLI options
 OPEN_BROWSER=1
@@ -31,7 +41,12 @@ for arg in "$@"; do
 done
 
 # ROCm env (mirrors CLAUDE.md whisperx setup; safe to set per-pane).
-ENV_PREFIX='export HSA_OVERRIDE_GFX_VERSION=11.5.0 ROCM_PATH=/opt/rocm HIP_VISIBLE_DEVICES=0; '
+# HSA_OVERRIDE_GFX_VERSION must NOT be set: torch/llama.cpp here are native
+# gfx1150 builds, so the override is at best a no-op and at worst fatal — a
+# stale value copied from an old runbook (e.g. 11.0.0) makes the runtime report
+# gfx1100 and every kernel launch fails. We unset it explicitly in case a shell
+# profile exports it.
+ENV_PREFIX='unset HSA_OVERRIDE_GFX_VERSION; export ROCM_PATH=/opt/rocm HIP_VISIBLE_DEVICES=0; '
 
 if ! command -v tmux >/dev/null; then
     echo "ERROR: tmux is not installed. Install with: sudo apt install tmux" >&2
@@ -55,6 +70,46 @@ if [[ ! -f "$VLM_MMPROJ" ]]; then
     exit 1
 fi
 
+# Read the YOLO backend + NPU settings from config.yaml (pyyaml is a core dep,
+# so `uv run` always has it). Defaults keep us on the GPU path if parsing fails.
+CONFIG_LINE="$(cd "$PROJECT_DIR" && uv run python -c '
+import yaml
+y = yaml.safe_load(open("config.yaml")).get("yolo", {})
+npu = y.get("npu", {})
+print(y.get("backend", "gpu"), npu.get("onnx", "models/yolo11m_a16w8.onnx"), npu.get("port", 8082))
+' 2>/dev/null)"
+[[ -z "$CONFIG_LINE" ]] && CONFIG_LINE="gpu - -"
+read -r YOLO_BACKEND NPU_ONNX NPU_PORT <<< "$CONFIG_LINE"
+
+if [[ "$YOLO_BACKEND" == "npu" ]]; then
+    if [[ ! -f "$RAI_ENV" ]]; then
+        echo "ERROR: yolo.backend=npu but Ryzen AI env script not found at $RAI_ENV" >&2
+        echo "       Set yolo.backend: gpu in config.yaml to use the GPU path instead." >&2
+        exit 1
+    fi
+    # rai_env.sh picks Ryzen AI 1.8 or falls back to 1.7.1, and prints its own
+    # diagnosis to stderr if neither is usable. Run it in a subshell here so we
+    # fail before tmux starts, instead of leaving a dead npu-yolo window behind.
+    if ! RAI_VERSION="$(bash -c 'source "$1" >/dev/null && printf "%s" "$RAI_VERSION"' _ "$RAI_ENV")"; then
+        echo "ERROR: yolo.backend=npu but no usable Ryzen AI environment (see above)." >&2
+        exit 1
+    fi
+    echo "NPU sidecar will use Ryzen AI $RAI_VERSION."
+    if [[ ! -f "$PROJECT_DIR/$NPU_ONNX" ]]; then
+        echo "ERROR: NPU model not found at $PROJECT_DIR/$NPU_ONNX" >&2
+        echo "       Copy it: cp ~/yolotest/yolo11m_a16w8.onnx $PROJECT_DIR/models/" >&2
+        exit 1
+    fi
+    # XRT allocates pinned buffers; with the stock 8 MB memlock limit every NPU
+    # run dies with EAGAIN. ~/ryzenai_1_8/fix_memlock.sh raises it, but only for
+    # terminals opened afterwards — so fail loudly here instead of in the sidecar.
+    if [[ "$(ulimit -H -l)" == "8192" ]]; then
+        echo "ERROR: memlock hard limit is still 8192 KB — XRT will fail with EAGAIN." >&2
+        echo "       Run 'bash ~/ryzenai_1_8/fix_memlock.sh', then open a NEW terminal." >&2
+        exit 1
+    fi
+fi
+
 if tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "ERROR: tmux session '$SESSION' is already running."
     echo "       Run ./stop_all.sh first, or attach: tmux attach -t $SESSION"
@@ -68,9 +123,11 @@ tmux send-keys -t "$SESSION:capture" "${ENV_PREFIX}uv run capture-run" C-m
 # Give capture ~1s head-start so SHM is ready before yolo/vlm start probing.
 sleep 1
 
-# serve (FastAPI + aiortc + YoloRunner + VlmRunner)
+# serve (FastAPI + aiortc + YoloRunner + VlmRunner). The webrtc extra carries
+# fastapi/aiortc/uvicorn/requests — `uv run` without it syncs the env down to the
+# base deps and serve dies with ModuleNotFoundError: fastapi.
 tmux new-window -t "$SESSION:" -n serve -c "$PROJECT_DIR"
-tmux send-keys -t "$SESSION:serve" "${ENV_PREFIX}uv run serve" C-m
+tmux send-keys -t "$SESSION:serve" "${ENV_PREFIX}uv run --extra webrtc serve" C-m
 
 # llama-server (multimodal Nemotron). --reasoning off is required:
 # without it the *-Reasoning model spends n_predict on thinking tokens.
@@ -80,11 +137,25 @@ tmux send-keys -t "$SESSION:vlm" "${ENV_PREFIX}${LLAMA_BIN} \
   --mmproj '$VLM_MMPROJ' \
   -c 8192 -ngl 99 --port 8081 --host 127.0.0.1 --reasoning off" C-m
 
+# npu-yolo (only for backend: npu). Runs under the Ryzen AI venv — do NOT apply
+# ENV_PREFIX (ROCM_PATH etc. are for the GPU); scripts/rai_env.sh sets XRT.
+# PYTHONPATH lets the sidecar import src.capture.shm_writer (pure-python SHM).
+WINDOWS_MSG="3 windows: capture, serve, vlm"
+SWITCH_MSG="Ctrl-b 0 (capture), Ctrl-b 1 (serve), Ctrl-b 2 (vlm)"
+if [[ "$YOLO_BACKEND" == "npu" ]]; then
+    tmux new-window -t "$SESSION:" -n npu-yolo -c "$PROJECT_DIR"
+    tmux send-keys -t "$SESSION:npu-yolo" \
+      "source '$RAI_ENV' && PYTHONPATH='$PROJECT_DIR' \
+python '$PROJECT_DIR/scripts/npu_yolo_sidecar.py' --model '$NPU_ONNX' --port $NPU_PORT" C-m
+    WINDOWS_MSG="4 windows: capture, serve, vlm, npu-yolo"
+    SWITCH_MSG="Ctrl-b 0 (capture), 1 (serve), 2 (vlm), 3 (npu-yolo)"
+fi
+
 cat <<EOF
-Started tmux session '$SESSION' with 3 windows: capture, serve, vlm.
+Started tmux session '$SESSION' with $WINDOWS_MSG.
 
   Attach :  tmux attach -t $SESSION
-  Switch :  Ctrl-b 0 (capture), Ctrl-b 1 (serve), Ctrl-b 2 (vlm)
+  Switch :  $SWITCH_MSG
   Detach :  Ctrl-b d
   Stop   :  ./stop_all.sh
 

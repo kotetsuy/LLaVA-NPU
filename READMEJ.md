@@ -84,12 +84,19 @@ extra 名は歴史的経緯で `webrtc` のままですが、現行サーバは 
 `~/.bashrc` などに追加して、新しいシェルで自動的に効くようにしておくと楽:
 
 ```bash
-export HSA_OVERRIDE_GFX_VERSION=11.5.0
 export ROCM_PATH=/opt/rocm
 export HIP_VISIBLE_DEVICES=0
 ```
 
 (`start_all.sh` は内部で再 export するので、シェル設定を忘れていても tmux セッションでは効きます。)
+
+> **`HSA_OVERRIDE_GFX_VERSION` は設定しないこと。** ROCm wheel も llama.cpp
+> (`-DAMDGPU_TARGETS=gfx1150`) も gfx1150 ネイティブビルドなので、override を付けても
+> 得るものはありません。逆に古い手順書からコピーした値が残っていると致命的で、
+> `HSA_OVERRIDE_GFX_VERSION=11.0.0` だとランタイムが `gfx1100` として認識し、
+> カーネル起動がすべて失敗します (`HIP error: invalid device function`)。
+> シェルのプロファイルで export されている場合に備え、`start_all.sh` は明示的に
+> `unset` しています。
 
 ### 7. Nemotron Nano Omni GGUF の準備
 
@@ -262,6 +269,118 @@ python3 -m compileall -q src scripts && echo OK
 # モジュール import 確認 (依存解決の確認も兼ねる)
 uv run python -c "from src.server.app import app; print('imports OK')"
 ```
+
+---
+
+## NPU バックエンド（YOLO11m を XDNA2 NPU で実行）
+
+YOLO11m の物体検出を、従来の **Ultralytics YOLO(GPU/ROCm, `yolo11m.pt`)** から
+**NPU 実行(VitisAI EP, `yolo11m_a16w8.onnx`)** に載せ替えられます。VLM(Nemotron)・カメラ・MJPEG 配信は無改修。
+サイドカー方式（VLM の llama-server と同じ別プロセス+ローカルHTTP）で実装されており、`config.yaml` の
+`yolo.backend` を `npu`/`gpu` で切替でき、GPU 経路へのロールバックは一行です。
+アーキテクチャ・設計背景・実機検証の詳細は [`TECHNICAL.md`](./TECHNICAL.md) を参照。
+
+### 成果サマリ（何が動くようになったか）
+
+| 項目 | 結果 |
+|---|---|
+| NPU で YOLO11m 検出 | ✅ bus.jpg で **person×4 + bus×1**（信頼度 0.89/0.89/0.89/0.75, bus 0.87）= yolotest の A16W8 と一致 |
+| NPU オフロード実証 | ✅ `xrt-smi` で **HW Context=Active・Columns[0-7]・Submissions 増加** |
+| 座標系（逆letterbox） | ✅ bbox は入力フレーム座標系（1280×720 相当）に正しく戻る。全ボックスがフレーム内 |
+| スループット | ✅ ウォームアップ後 ~28–29 inf/s（yolotest と同等。カメラ30fpsは最新フレーム処理で自然に間引き） |
+| バックエンド切替 | ✅ `config.yaml` `yolo.backend: npu|gpu`。npu 不調なら gpu に戻すだけ |
+| クライアント互換 | ✅ bbox JSON スキーマ・`/ws/bbox` は不変（ブラウザ側 canvas は無改修） |
+
+### 使い方
+
+#### バックエンド切替（`config.yaml`）
+```yaml
+yolo:
+  backend: npu   # npu = XDNA2 NPU(VitisAI, 別プロセス) / gpu = Ultralytics(ROCm, serve内)
+```
+
+#### 起動・停止
+```bash
+./start_all.sh          # backend:npu なら npu-yolo ウィンドウも自動起動
+./stop_all.sh
+tmux attach -t llava    # Ctrl-b 0/1/2/3 = capture/serve/vlm/npu-yolo
+```
+起動順は不問（serve 側はサイドカーが立つまで HTTP retry する）。
+
+#### 検証（実機）
+```bash
+# サイドカー稼働中に別ターミナルで NPU オフロードを確認
+/opt/xilinx/xrt/bin/xrt-smi examine -d 0000:c6:00.1 -r all
+#  → HW Context=Active・Columns[0-7]・Submissions 増加 なら NPU 実行中
+```
+ブラウザ `http://localhost:8080/` を開き、人/物が bbox に正しく収まるか目視確認する。
+（判定基準は「`Test Finished`」ではなく「`xrt-smi` が Active」＋「ブラウザで正しい位置」）
+
+### 運用上の注意（実装で判明した点）
+
+- **初回コンパイル ~25秒、2回目以降 ~0.7秒**: VitisAI はセッション生成時に量子化モデルを
+  `AMD_AIE2P_4x8_CMC_Overlay` 向けにコンパイルする。Ryzen AI 1.8 はその結果をディスクに残さない
+  （1.7.1 の `cacheDir`/`cacheKey` provider option は 1.8 では無効）ため、サイドカー側で一度だけ
+  `models/yolo11m_a16w8_ctx.onnx`（EPContext モデル）にコンパイルして保存し、以降の起動で再利用する。
+  セッション生成が約25秒→約0.7秒になり、出力はビット一致・推論時間も約33ms/回で変わらない。
+  元モデル・onnxruntime・Ryzen AI のバージョンが変わると自動で再生成される
+  （スタンプ: `models/yolo11m_a16w8_ctx.json`。どちらも gitignore 済み）。`--no-ctx-cache` で無効化可。
+  サイドカーは**ウォームアップ完了後に `/latest` を出す**設計なので、serve 側は準備できるまで
+  自然に待つ（bbox 空→準備後に出始める）。
+- **venv 分離は厳守**: サイドカーは RAI venv(`source scripts/rai_env.sh`)、serve は uv venv。
+  `start_all.sh` はサイドカーのウィンドウにだけ RAI env を source し、ROCm 用 `ENV_PREFIX`
+  (`ROCM_PATH` / `HIP_VISIBLE_DEVICES`) は付けない（NPU には不要）。
+- **サイドカーの起動コマンド**: RAI venv の python で、`PYTHONPATH=<repo>` を通して起動する
+  （`src.capture.shm_writer` / `src.npu_yolo.postprocess` を import するため）。`uv run` ではない。
+  `start_all.sh` が自動でこの形にする。
+- **ロールバック**: NPU が不調なら `config.yaml` の `yolo.backend: gpu` に戻すだけ。サイドカーは
+  起動されず、従来の ultralytics/GPU 経路が serve プロセス内で動く。
+
+### 実行時に必要なもの（`~/yolotest` フォルダは不要）
+
+- Ryzen AI のインストール。有効化は **`scripts/rai_env.sh`** を source する。以下を順に試す:
+  1. **1.8** = `~/ryzenai_1_8/venv`（onnxruntime 1.27.0、`VitisAIExecutionProvider` 入り）
+     + XRT 2.25.37 / NPU スタック。RAI 1.8 には `setup_ryzenai_env.sh` が同梱されていないため、
+     このスクリプトが環境構築を肩代わりする。
+  2. **1.7.1** = `~/ryzenai/ryzenai_venv/setup_ryzenai_env.sh`（onnxruntime-vitisai 1.23.3 /
+     voe 1.7.1 + XRT 2.21）。1.8 に上げず 1.7.1 を修理して使っているマシン向けの互換経路。
+
+  両方ある場合は 1.8 を優先する（1.8 に移行したマシンにも 1.7.1 のディレクトリは残っているが、
+  その venv はもう起動しないため）。`RAI18_VENV` / `RAI171_SETUP` で上書き可能。
+- `models/yolo11m_a16w8.onnx`（コピー済み）— 1.7.1 で作ったモデルは 1.8 でもそのまま読めて動く。
+  **アップグレード後の再量子化は不要**。
+- LLaVA の uv venv（npu 経路は `requests`=webrtc extra を使用）
+
+`~/yolotest` は**再量子化する時のみ**必要（下記）。通常運用では参照しない。モデルも前後処理コードも
+リポジトリ内に取り込み済みで、LLaVA-NPU 単体で自己完結する。
+
+#### 再量子化が要るとき（通常不要）
+A16W8 を作り直したい場合のみ:
+```bash
+source ~/LLaVA-NPU/scripts/rai_env.sh
+python ~/yolotest/quantize_yolo11m_a16w8.py --input ~/yolo/yolo11m.onnx \
+    --output ~/LLaVA-NPU/models/yolo11m_a16w8.onnx --calib-dir ~/yolotest/calib2
+```
+
+---
+
+## NPU 復旧・運用メモ（環境アップグレード後）
+
+Ubuntu を **26.04** へ、ROCm を **7.14** へアップグレードした直後、NPU(`amdxdna`) が動作しなくなった
+ことがある。3つの独立した問題を切り分けて解消し、一般ユーザ権限で `xrt-smi examine` が
+**NPU Strix Halo（Firmware 1.1.2.65）** を認識する状態まで復旧した（根本原因と対処コマンドは
+[`TECHNICAL.md`](./TECHNICAL.md) の「NPU recovery」節を参照）。
+
+### 最終検証（再起動後、一般ユーザ `araki` で）— ✅ 全て合格
+
+```bash
+ulimit -l                                              # → unlimited                     ✅
+ls -l /dev/accel/accel0                                # crw-rw-rw-+ root render 261,0    ✅
+source /opt/xilinx/xrt/setup.sh && xrt-smi examine     # [0000:c6:00.1] NPU Strix Halo    ✅
+```
+
+3点すべて `sudo` なしで通れば、YOLO11m の NPU パイプライン（`start_all.sh` /
+`scripts/npu_yolo_sidecar.py`）を一般ユーザ権限で実行できる。
 
 ---
 
