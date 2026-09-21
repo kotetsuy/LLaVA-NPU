@@ -82,6 +82,6 @@ vlm:
 
   # Step 7b: 本番は llama-server を別プロセスで起動して HTTP で叩く
   server:
-    base_url: http://127.0.0.1:8081
+    base_url: http://127.0.0.1:9931
     cadence_sec: 2.0       # キャプション間隔 (HANDOFF: 0.5fps)
     jpeg_quality: 90       # SHM frame -> JPEG -> base64 -> server
