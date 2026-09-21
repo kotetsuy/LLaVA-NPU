@@ -37,13 +37,9 @@ for arg in "$@"; do
     esac
 done
 
-# ROCm env (mirrors CLAUDE.md whisperx setup; safe to set per-pane).
-# HSA_OVERRIDE_GFX_VERSION must NOT be set: torch/llama.cpp here are native
-# gfx1150 builds, so the override is at best a no-op and at worst fatal — a
-# stale value copied from an old runbook (e.g. 11.0.0) makes the runtime report
-# gfx1100 and every kernel launch fails. We unset it explicitly in case a shell
-# profile exports it.
-ENV_PREFIX='unset HSA_OVERRIDE_GFX_VERSION; export ROCM_PATH=/opt/rocm HIP_VISIBLE_DEVICES=0; '
+# Apply the same ROCm environment to GPU processes, including fresh tmux panes.
+# Keep the NPU sidecar's XRT environment separate.
+printf -v ENV_PREFIX 'source %q && ' "$PROJECT_DIR/scripts/rocm_env.sh"
 
 if ! command -v tmux >/dev/null; then
     echo "ERROR: tmux is not installed. Install with: sudo apt install tmux" >&2
@@ -156,7 +152,7 @@ tmux send-keys -t "$SESSION:serve" "${ENV_PREFIX}uv run --no-sync serve" C-m
 # llama-server (multimodal Nemotron). --reasoning off is required:
 # without it the *-Reasoning model spends n_predict on thinking tokens.
 tmux new-window -t "$SESSION:" -n vlm -c "$PROJECT_DIR"
-tmux send-keys -t "$SESSION:vlm" "${ENV_PREFIX}${LLAMA_BIN} \
+tmux send-keys -t "$SESSION:vlm" "${ENV_PREFIX}'${LLAMA_BIN}' \
   -m '$VLM_MODEL' \
   --mmproj '$VLM_MMPROJ' \
   -c '$VLM_CTX' -ngl '$VLM_NGL' -np 1 --port '$VLM_PORT' --host '$VLM_HOST' --reasoning off" C-m

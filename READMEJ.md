@@ -1,5 +1,9 @@
 # LLaVA on ROCm — USB カメラ × YOLO11m × Nemotron Nano Omni × Chrome MJPEG
 
+> **ROCm 10 / gfx1151（Radeon 8060S）** は [起動手順](GFX1151_ROCM10.md) を参照してください。
+> 以下のROCm 7.2.1手順は旧環境の記録です。
+
+
 > `hx370-gfx1150` ブランチの **Ryzen AI 9 HX 370 / Radeon 890M / ROCm 10**
 > での起動手順・検証結果は [HX370_ROCM10.md](./HX370_ROCM10.md) を参照。
 > 以下のNucBox EVO X2向け手順とは、モデル配置とROCmの導入済み環境が異なります。
@@ -16,7 +20,7 @@ NucBox EVO X2 (Ryzen AI MAX+ 395 / Radeon 8060S, ROCm 7.2.1) 上で USB カメ�
 
 | 項目 | 想定値 |
 |------|------|
-| マシン | NucBox EVO X2 (AMD Ryzen AI MAX+ 395, gfx1150, 48GB unified) |
+| マシン | NucBox EVO X2 (AMD Ryzen AI MAX+ 395, gfx1151, 48GB unified) |
 | OS | Ubuntu 24.04.4 LTS (HWE kernel) |
 | ROCm | 7.2.1 (`/opt/rocm` symlink) |
 | Python | 3.12 |

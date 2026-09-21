@@ -122,6 +122,9 @@ class VlmWorker:
     extra_args: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        self.binary = str(Path(self.binary).expanduser())
+        self.model = str(Path(self.model).expanduser())
+        self.mmproj = str(Path(self.mmproj).expanduser())
         for label, p in [("binary", self.binary), ("model", self.model), ("mmproj", self.mmproj)]:
             if not Path(p).exists():
                 log.warning("%s does not exist: %s", label, p)
