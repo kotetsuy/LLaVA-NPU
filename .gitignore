@@ -224,6 +224,7 @@ __marimo__/
 # Local capture / inference output
 /output/
 /captures/
+/videos/
 *.mp4
 *.webm
 

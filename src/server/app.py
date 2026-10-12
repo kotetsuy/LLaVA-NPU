@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.capture.shm_writer import FrameSHM
+from src.capture.playlist import load_playlist
 
 from .vlm_runner import VlmRunner
 from .ws_broadcaster import WsBroadcaster
@@ -119,6 +120,31 @@ app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(str(WEB_DIR / "index.html"))
+
+
+@app.get("/source")
+async def source() -> dict[str, str]:
+    """Current playlist credit for the browser's video overlay."""
+    cfg = _load_config()
+    playlist_path = Path(cfg["camera"].get("playlist", "videos/playlist.m3u8"))
+    if not playlist_path.is_absolute():
+        playlist_path = CONFIG_PATH.resolve().parent / playlist_path
+    try:
+        shm = FrameSHM.attach(cfg["shm"]["name"])
+    except (FileNotFoundError, RuntimeError):
+        return {"credit": ""}
+    try:
+        source_index = shm.read_source_index()
+    finally:
+        shm.close()
+    if not source_index:
+        return {"credit": ""}
+    try:
+        entries = load_playlist(playlist_path)
+    except OSError:
+        return {"credit": ""}
+    index = source_index - 1
+    return {"credit": entries[index].credit if index < len(entries) else ""}
 
 
 _MJPEG_BOUNDARY = "frame"

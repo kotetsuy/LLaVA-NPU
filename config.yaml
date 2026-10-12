@@ -15,6 +15,7 @@ camera:
                        # none = preferred にマッチするカメラのみ使う
   preempt: true        # 配信中でも、より優先度の高いカメラが挿されたら自動で乗り換える
   preempt_settle_sec: 1.0  # add イベント後にデバイス安定化を待つ秒数 (この間ブロックはしない)
+  playlist: videos/playlist.m3u8  # カメラ未接続時に順番に再生し、最後まで再生したら先頭へ戻る
   format:
     width: 1280
     height: 720

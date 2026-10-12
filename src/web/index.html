@@ -40,6 +40,21 @@
     .stage canvas {
       pointer-events: none;
     }
+    .video-credit {
+      position: absolute;
+      left: 12px;
+      bottom: 10px;
+      max-width: calc(100% - 24px);
+      box-sizing: border-box;
+      padding: 3px 5px;
+      color: white;
+      background: rgba(0, 0, 0, 0.65);
+      font-size: 11px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+      pointer-events: none;
+    }
+    .video-credit:empty { display: none; }
     .status-row {
       display: flex;
       flex-wrap: wrap;
@@ -74,6 +89,7 @@
     <div class="stage">
       <img id="stream" src="/stream.mjpg" alt="">
       <canvas id="overlay"></canvas>
+      <div class="video-credit" id="video-credit"></div>
     </div>
     <div class="status-row">
       <span class="status" id="status">connecting…</span>
@@ -107,6 +123,18 @@
       }, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, 5000);
     });
+
+    const $credit = document.getElementById('video-credit');
+    async function updateCredit() {
+      try {
+        const response = await fetch('/source', { cache: 'no-store' });
+        if (response.ok) $credit.textContent = (await response.json()).credit || '';
+      } catch (_) {
+        $credit.textContent = '';
+      }
+    }
+    updateCredit();
+    setInterval(updateCredit, 250);
   </script>
   <script src="/static/overlay.js"></script>
   <script src="/static/caption.js"></script>

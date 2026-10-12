@@ -13,8 +13,8 @@ Layout::
     offset 28  : scale            float32
     offset 32  : channels         uint8
     offset 33  : pixel_format     uint8   (0=BGR, 1=RGB)
-    offset 34  : connected        uint8   (0=synthetic black "no camera", 1=live frame)
-    offset 35  : _padding         1 byte
+    offset 34  : connected        uint8   (0=no usable frame, 1=camera or playlist)
+    offset 35  : source_index     uint8   (0=camera/black, 1..255=playlist entry)
     offset 36  : frame data       (frame_w * frame_h * channels) uint8
 
 Concurrency: a single writer (Capture proc) and N readers. The seqlock pattern
@@ -36,7 +36,7 @@ PixelFormat = Literal["BGR", "RGB"]
 _PIXFMT_TO_INT = {"BGR": 0, "RGB": 1}
 _INT_TO_PIXFMT = {v: k for k, v in _PIXFMT_TO_INT.items()}
 
-_HEADER_FMT = "<QQHHHHHHfBBB1x"
+_HEADER_FMT = "<QQHHHHHHfBBBB"
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
 assert _HEADER_SIZE == 36
 
@@ -86,6 +86,7 @@ class FrameMetadata:
     channels: int
     pixel_format: PixelFormat
     connected: bool  # False when the writer is emitting synthetic black frames
+    source_index: int = 0
 
 
 class FrameSHM:
@@ -147,7 +148,7 @@ class FrameSHM:
         shm = SharedMemory(name=name)
         # peek the header to recover dimensions; if seq==0 we still trust the layout.
         unpacked = struct.unpack_from(_HEADER_FMT, shm.buf, 0)
-        (_, _, _, _, frame_w, frame_h, _, _, _, channels, pixfmt, _connected) = unpacked
+        (_, _, _, _, frame_w, frame_h, _, _, _, channels, pixfmt, _connected, _source) = unpacked
         if frame_w == 0 or frame_h == 0 or channels == 0:
             shm.close()
             raise RuntimeError(
@@ -172,6 +173,7 @@ class FrameSHM:
         scale: float,
         timestamp_ns: int,
         connected: bool = True,
+        source_index: int = 0,
     ) -> int:
         if frame.shape != (self.frame_h, self.frame_w, self.channels):
             raise ValueError(
@@ -200,6 +202,7 @@ class FrameSHM:
             self.channels,
             _PIXFMT_TO_INT[self.pixel_format],
             1 if connected else 0,
+            source_index,
         )
         np.copyto(self._frame_view, frame)
         even_seq = odd_seq + 1
@@ -240,6 +243,7 @@ class FrameSHM:
                 ch,
                 pixfmt_int,
                 connected_int,
+                source_index,
             ) = unpacked
             frame = np.array(self._frame_view, copy=True)
             (s2,) = struct.unpack_from("<Q", self._buf, 0)
@@ -259,8 +263,23 @@ class FrameSHM:
                 channels=ch,
                 pixel_format=_INT_TO_PIXFMT.get(pixfmt_int, "BGR"),
                 connected=bool(connected_int),
+                source_index=source_index,
             )
             return frame, meta
+        return None
+
+    def read_source_index(self) -> int | None:
+        """Read source metadata without copying the full video frame."""
+        for _ in range(16):
+            (before,) = struct.unpack_from("<Q", self._buf, 0)
+            if before == 0 or before & 1:
+                time.sleep(0.0001)
+                continue
+            connected, source_index = struct.unpack_from("<BB", self._buf, 34)
+            (after,) = struct.unpack_from("<Q", self._buf, 0)
+            if before == after:
+                return source_index if connected else 0
+            time.sleep(0.0001)
         return None
 
     def close(self) -> None:

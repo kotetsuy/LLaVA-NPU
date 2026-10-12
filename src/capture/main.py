@@ -1,7 +1,7 @@
 """Capture loop entrypoint with hotplug-aware state machine.
 
 States:
-    SEARCHING   no live camera; emits a synthetic black frame at ~target FPS.
+    SEARCHING   no live camera; plays the local playlist (black if unavailable).
     CAPTURING   has a live cv2.VideoCapture handed to a CaptureReader thread;
                 forwards each new frame (letterboxed) into SHM.
 
@@ -27,6 +27,7 @@ from .capture_session import CaptureReader, OpenedCamera, open_camera
 from .device_manager import enumerate_devices, select_device_ranked
 from .frame_normalizer import letterbox
 from .hotplug_watcher import HotplugEvent, HotplugWatcher
+from .playlist import PlaylistPlayer, load_playlist
 from .shm_writer import FrameSHM
 
 log = logging.getLogger("capture")
@@ -118,6 +119,14 @@ def main() -> int:
     preferred = cam_cfg.get("preferred", [])
     preempt_enabled = bool(cam_cfg.get("preempt", True))
     preempt_settle_sec = float(cam_cfg.get("preempt_settle_sec", 1.0))
+    playlist_path = Path(cam_cfg.get("playlist", "videos/playlist.m3u8"))
+    if not playlist_path.is_absolute():
+        playlist_path = args.config.resolve().parent / playlist_path
+    try:
+        playlist = PlaylistPlayer(load_playlist(playlist_path))
+    except OSError as e:
+        log.warning("playlist unavailable (%s): %s", playlist_path, e)
+        playlist = PlaylistPlayer([])
 
     # initial inventory log
     initial = enumerate_devices()
@@ -138,6 +147,9 @@ def main() -> int:
     watcher.start()
 
     black = _build_black_frame(target_w, target_h)
+    fallback_frame = black
+    fallback_meta = (0, 0, 0, 0, 0.0)
+    fallback_source = 0
 
     stop = {"flag": False}
 
@@ -159,6 +171,7 @@ def main() -> int:
 
     def _enter_searching(reason: str) -> None:
         nonlocal state, reader, last_frame_ts, current_rank, pending_preempt_at
+        nonlocal fallback_frame, fallback_meta, fallback_source
         log.info("-> SEARCHING (%s)", reason)
         if reader is not None:
             reader.stop()
@@ -166,6 +179,7 @@ def main() -> int:
         current_rank = None
         pending_preempt_at = None
         last_frame_ts = -1.0
+        fallback_frame, fallback_meta, fallback_source = black, (0, 0, 0, 0, 0.0), 0
         state = State.SEARCHING
 
     def _enter_capturing(new_reader: CaptureReader, rank: int | None) -> None:
@@ -180,6 +194,7 @@ def main() -> int:
             _rank_name(preferred, rank),
         )
         new_reader.start()
+        playlist.close()
         reader = new_reader
         current_rank = rank
         last_frame_ts = -1.0
@@ -265,15 +280,25 @@ def main() -> int:
                         )
                         _enter_capturing(CaptureReader(opened), rank)
                 if state is State.SEARCHING:
+                    got_video = playlist.read(now)
+                    if got_video is not None:
+                        video_frame, fallback_source = got_video
+                        normalized = letterbox(video_frame, target_w=target_w, target_h=target_h)
+                        fallback_frame = normalized.image
+                        fallback_meta = (
+                            normalized.original_w, normalized.original_h,
+                            normalized.pad_x, normalized.pad_y, normalized.scale,
+                        )
                     shm.write(
-                        black,
-                        original_w=0,
-                        original_h=0,
-                        pad_x=0,
-                        pad_y=0,
-                        scale=0.0,
+                        fallback_frame,
+                        original_w=fallback_meta[0],
+                        original_h=fallback_meta[1],
+                        pad_x=fallback_meta[2],
+                        pad_y=fallback_meta[3],
+                        scale=fallback_meta[4],
                         timestamp_ns=time.time_ns(),
-                        connected=False,
+                        connected=bool(fallback_source),
+                        source_index=fallback_source,
                     )
                     sleep_for = frame_period - (time.monotonic() - now)
                     if sleep_for > 0:
@@ -323,6 +348,7 @@ def main() -> int:
                     fps_window = 0
                     fps_t0 = now
     finally:
+        playlist.close()
         if reader is not None:
             reader.stop()
         watcher.stop()
