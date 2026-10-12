@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.npu_yolo.postprocess import decode_detections, letterbox, preprocess
+from src.npu_yolo.postprocess import (
+    decode_detections, decode_yolo26, letterbox, preprocess, quantize_input,
+)
 
 
 def test_letterbox_params_for_16x9():
@@ -88,3 +90,20 @@ def test_class_aware_nms_keeps_overlapping_different_classes():
     lb = preprocess(np.zeros((720, 1280, 3), dtype=np.uint8), 640)[1]
     dets = decode_detections(out, lb, 1280, 720, conf_thresh=0.25, iou_thresh=0.45)
     assert {d["cls"] for d in dets} == {0, 2}
+
+
+def test_yolo26_quantized_input_and_split_output():
+    scale = 3.0518509447574615e-05
+    tensor = np.array([0, 0.5, 1], dtype=np.float32)
+    assert quantize_input(tensor, scale).tolist() == [0, 16384, 32767]
+
+    boxes = np.zeros((1, 4, 8400), dtype=np.float32)
+    scores = np.zeros((1, 80, 8400), dtype=np.float32)
+    boxes[0, :, 0] = [270, 270, 370, 370]  # xyxy in letterbox space
+    scores[0, 0, 0] = 0.9
+    lb = preprocess(np.zeros((720, 1280, 3), dtype=np.uint8), 640)[1]
+    dets = decode_yolo26(boxes, scores, lb, 1280, 720)
+    assert dets == [{
+        "label": "person", "conf": 0.9, "cls": 0,
+        "x1": 540.0, "y1": 260.0, "x2": 740.0, "y2": 460.0,
+    }]

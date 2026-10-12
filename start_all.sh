@@ -78,7 +78,7 @@ values = {
     'VLM_PORT': endpoint.port or 8081,
     'VLM_HOST': endpoint.hostname or '127.0.0.1',
     'YOLO_BACKEND': y.get('backend', 'gpu'),
-    'NPU_ONNX': str(Path(n.get('onnx', 'models/yolo11m_a16w8.onnx')).expanduser().resolve()),
+    'NPU_ONNX': str(Path(n.get('onnx', 'models/yolo26n-640-split-v3-a16w8-perchannel-int16.onnx')).expanduser().resolve()),
     'NPU_PORT': int(n.get('port', 8082)),
     'URL': f"http://localhost:{cfg['server']['port']}/",
 }
@@ -117,7 +117,7 @@ if [[ "$YOLO_BACKEND" == "npu" ]]; then
     echo "NPU sidecar will use Ryzen AI $RAI_VERSION."
     if [[ ! -f "$NPU_ONNX" ]]; then
         echo "ERROR: NPU model not found at $NPU_ONNX" >&2
-        echo "       Copy it: cp ~/yolotest/yolo11m_a16w8.onnx $PROJECT_DIR/models/" >&2
+        echo "       Copy the configured ONNX and its matching JSON metadata into models/." >&2
         exit 1
     fi
     # XRT allocates pinned buffers; with the stock 8 MB memlock limit every NPU

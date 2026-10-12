@@ -1,0 +1,6 @@
+{
+  "input_type": "INT16",
+  "scale": 3.0518509447574615e-05,
+  "zero_point": 0,
+  "model_sha256": "663dbb1792126a3de2e7ea1a27a4db11839eb88a89a6f72507390d38d7d20c9b"
+}

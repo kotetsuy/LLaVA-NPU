@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NPU YOLO11m sidecar — runs object detection on the AMD XDNA2 NPU.
+"""NPU YOLO sidecar — runs object detection on the AMD XDNA2 NPU.
 
 This process is the NPU counterpart of ``src/inference/yolo_worker.py`` (which
 runs Ultralytics on the GPU). It must run under the **Ryzen AI 1.8 venv**, which
@@ -7,7 +7,7 @@ is the only environment that has the VitisAI EP + XRT:
 
     source ~/LLaVA-NPU/scripts/rai_env.sh
     PYTHONPATH=~/LLaVA-NPU python ~/LLaVA-NPU/scripts/npu_yolo_sidecar.py \
-        --model models/yolo11m_a16w8.onnx --port 8082
+        --model models/yolo26n-640-split-v3-a16w8-perchannel-int16.onnx --port 8082
 
 Why a separate process (not a thread in ``serve``): the NPU stack needs
 the VitisAI EP's onnxruntime and XRT's ``LD_LIBRARY_PATH``, which conflict with the
@@ -19,7 +19,7 @@ Startup: the model is compiled for the NPU once and cached next to it as
 recompiles the graph on every launch — see ``_ensure_ep_context``.
 
 Flow: attach the capture SHM -> read the latest 1280x720 BGR frame -> letterbox
-to 640 -> VitisAI EP inference on the NPU -> decode + class-aware NMS -> invert
+to 640 -> VitisAI EP inference on the NPU -> decode -> invert
 the letterbox so boxes are back in 1280x720 -> publish as JSON on ``/latest``.
 The bbox JSON schema matches ``YoloRunner._publish`` exactly, so the browser
 overlay is byte-for-byte compatible with the GPU path.
@@ -46,7 +46,7 @@ import numpy as np
 import onnxruntime as ort
 
 from src.capture.shm_writer import FrameSHM
-from src.npu_yolo.postprocess import decode_detections, preprocess
+from src.npu_yolo.postprocess import decode_detections, decode_yolo26, preprocess, quantize_input
 
 log = logging.getLogger("npu-yolo")
 
@@ -162,12 +162,15 @@ def _inference_loop(
     conf: float,
     iou: float,
     imgsz: int,
+    input_scale: float | None,
+    input_zero_point: int,
 ) -> None:
     input_name = sess.get_inputs()[0].name
+    split_output = len(sess.get_outputs()) == 2
 
     # Warm up so the first (slow) VitisAI subgraph compile happens before we
     # start publishing, and so /latest is populated promptly.
-    dummy = np.zeros((1, 3, imgsz, imgsz), dtype=np.float32)
+    dummy = np.zeros((1, 3, imgsz, imgsz), dtype=np.int16 if input_scale else np.float32)
     t0 = time.time()
     sess.run(None, {input_name: dummy})
     log.info("warmup inference done in %.2fs", time.time() - t0)
@@ -193,8 +196,12 @@ def _inference_loop(
 
         try:
             tensor, lb = preprocess(frame, imgsz)
-            out = sess.run(None, {input_name: tensor})[0]
-            boxes = decode_detections(out, lb, meta.frame_w, meta.frame_h, conf, iou)
+            if input_scale is not None:
+                tensor = quantize_input(tensor, input_scale, input_zero_point)
+            outputs = sess.run(None, {input_name: tensor})
+            boxes = (decode_yolo26(outputs[0], outputs[1], lb, meta.frame_w, meta.frame_h, conf)
+                     if split_output else
+                     decode_detections(outputs[0], lb, meta.frame_w, meta.frame_h, conf, iou))
         except Exception as e:  # noqa: BLE001
             log.warning("inference failed on seq=%d: %s", meta.seq, e)
             continue
@@ -250,7 +257,7 @@ def _make_handler(state: _State):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--model", required=True, help="path to yolo11m_a16w8.onnx")
+    ap.add_argument("--model", required=True, help="path to YOLO ONNX model")
     ap.add_argument("--shm", default="webcam_latest", help="capture SHM segment name")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8082)
@@ -272,8 +279,21 @@ def main() -> int:
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
 
     log.info("loading model %s (cpu=%s)", args.model, args.cpu)
+    metadata_path = Path(args.model).with_suffix(".json")
+    input_scale = None
+    input_zero_point = 0
+    if metadata_path.is_file():
+        metadata = json.loads(metadata_path.read_text())
+        if metadata.get("input_type") == "INT16":
+            input_scale = float(metadata["scale"])
+            input_zero_point = int(metadata["zero_point"])
     model = args.model if (args.cpu or args.no_ctx_cache) else _ensure_ep_context(args.model)
     sess = _build_session(model, args.cpu)
+    input_type = sess.get_inputs()[0].type
+    if (input_type == "tensor(int16)") != (input_scale is not None):
+        raise ValueError(f"Input type {input_type} disagrees with {metadata_path}")
+    if (len(sess.get_outputs()) == 2) != (input_scale is not None):
+        raise ValueError("Unsupported YOLO output layout")
 
     log.info("attaching SHM %r ...", args.shm)
     shm = _attach_shm(args.shm, stop)
@@ -285,7 +305,7 @@ def main() -> int:
     state = _State()
     worker = threading.Thread(
         target=_inference_loop,
-        args=(sess, shm, state, stop, args.conf, args.iou, args.imgsz),
+        args=(sess, shm, state, stop, args.conf, args.iou, args.imgsz, input_scale, input_zero_point),
         name="npu-yolo-infer",
         daemon=True,
     )

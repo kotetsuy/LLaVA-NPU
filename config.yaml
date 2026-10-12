@@ -49,7 +49,7 @@ yolo:
   # モデル・XRT 環境はサイドカー側 (RAI venv) が持つ。serve はこの URL を polling するだけ。
   # サイドカーの起動は start_all.sh が別 tmux ウィンドウで行う。
   npu:
-    onnx: ~/yolotest/yolo11m_a16w8.onnx  # Ryzen AI用A16W8モデル
+    onnx: models/yolo26n-640-split-v3-a16w8-perchannel-int16.onnx
     sidecar_url: http://127.0.0.1:8082   # serve が bbox を取りに行く先
     port: 8082                           # サイドカーの待受ポート
     poll_hz: 60                          # serve 側の /latest ポーリング周波数

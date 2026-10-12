@@ -299,6 +299,11 @@ YOLO11m の物体検出を、従来の **Ultralytics YOLO(GPU/ROCm, `yolo11m.pt`
 | バックエンド切替 | ✅ `config.yaml` `yolo.backend: npu|gpu`。npu 不調なら gpu に戻すだけ |
 | クライアント互換 | ✅ bbox JSON スキーマ・`/ws/bbox` は不変（ブラウザ側 canvas は無改修） |
 
+現在の NPU 設定は YOLO26n の INT16 入力・2出力 ONNX
+（`models/yolo26n-640-split-v3-a16w8-perchannel-int16.onnx`）を使用する。
+対応する同名 `.json` の量子化スケールも必要。上表の検出数・速度は以前の
+YOLO11m 実機測定値であり、YOLO26n の性能値ではない。
+
 ### 使い方
 
 #### バックエンド切替（`config.yaml`）

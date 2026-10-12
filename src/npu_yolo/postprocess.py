@@ -1,8 +1,8 @@
-"""YOLO11m NPU pre/post-processing (pure numpy + cv2, no torch/ultralytics).
+"""YOLO NPU pre/post-processing (pure numpy + cv2, no torch/ultralytics).
 
 This is the piece that replaces what Ultralytics did internally on the GPU
-path: letterbox the input to 640, and decode ``output0`` [1,84,8400] back into
-boxes *in the input frame's coordinate system*.
+path: letterbox the input to 640, and decode YOLO11m or YOLO26n outputs back
+into boxes *in the input frame's coordinate system*.
 
 Kept deliberately dependency-light (numpy + cv2 only) so it imports cleanly in
 the Ryzen AI venv (onnxruntime-vitisai) that the NPU sidecar runs under, which
@@ -65,6 +65,49 @@ def preprocess(frame_bgr: np.ndarray, size: int = 640) -> tuple[np.ndarray, Lett
     rgb = cv2.cvtColor(lb, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     tensor = np.ascontiguousarray(np.transpose(rgb, (2, 0, 1))[None])
     return tensor, params
+
+
+def quantize_input(tensor: np.ndarray, scale: float, zero_point: int = 0) -> np.ndarray:
+    """Quantize normalized RGB input exactly as ONNX QuantizeLinear does."""
+    values = np.rint(tensor / np.float32(scale) + np.float32(zero_point))
+    return np.clip(values, -32768, 32767).astype(np.int16)
+
+
+def decode_yolo26(
+    boxes: np.ndarray,
+    scores: np.ndarray,
+    lb: Letterbox,
+    frame_w: int,
+    frame_h: int,
+    conf_thresh: float = 0.25,
+) -> list[dict]:
+    """Decode YOLO26n's NMS-free split outputs into frame coordinates."""
+    if boxes.shape != (1, 4, 8400) or scores.shape != (1, 80, 8400):
+        raise ValueError(f"Unexpected YOLO26 outputs: {boxes.shape}, {scores.shape}")
+    box_rows, score_rows = boxes[0].T, scores[0].T
+    # Mirror the model's end-to-end stable top-300 selection, including ties.
+    anchors = np.argsort(-score_rows.max(axis=1), kind="stable")[:300]
+    flat = score_rows[anchors].reshape(-1)
+    selected = np.argsort(-flat, kind="stable")[:300]
+    dets: list[dict] = []
+    for index in selected:
+        conf = float(flat[index])
+        if conf <= conf_thresh:
+            break
+        cls = int(index % 80)
+        x1, y1, x2, y2 = box_rows[anchors[index // 80]]
+        x1 = float(np.clip((x1 - lb.left) / lb.scale, 0, frame_w))
+        y1 = float(np.clip((y1 - lb.top) / lb.scale, 0, frame_h))
+        x2 = float(np.clip((x2 - lb.left) / lb.scale, 0, frame_w))
+        y2 = float(np.clip((y2 - lb.top) / lb.scale, 0, frame_h))
+        if x2 <= x1 or y2 <= y1:
+            continue
+        dets.append({
+            "label": COCO_CLASSES[cls], "conf": round(conf, 3), "cls": cls,
+            "x1": round(x1, 1), "y1": round(y1, 1),
+            "x2": round(x2, 1), "y2": round(y2, 1),
+        })
+    return dets
 
 
 def _nms(boxes_xyxy: np.ndarray, scores: np.ndarray, iou_thresh: float) -> list[int]:
