@@ -233,6 +233,8 @@ __marimo__/
 *.pt
 *.onnx
 *.safetensors
+# Model metadata is distributed alongside local model files.
+/models/*.json
 
 # VitisAI / NPU compilation cache (regenerated on first inference).
 # *_ctx.onnx is covered by *.onnx above; *_ctx.json is its staleness stamp.
