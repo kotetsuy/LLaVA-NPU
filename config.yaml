@@ -3,6 +3,8 @@ camera:
   # 接続中のカメラのうち、ここで最も上にマッチした 1 台だけを画面に流す。
   # 2 台目以降は下に追記する (例の logicool 行を参照)。
   preferred:
+    - name: jieli-usb-camera
+      vid_pid: "1124:2925"
     - name: 2k-usb-camera     # name はログ表示用の任意ラベル (選択ロジックには不使用)
       by_id: usb-DC474C08_P050301_SN0002_2K_USB_Camera_DC474C08_P050301_SN0002*
     - name: 2k-usb-camera-vidpid   # 同一カメラの別名マッチも従来どおり並べられる
