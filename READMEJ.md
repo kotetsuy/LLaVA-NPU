@@ -351,15 +351,8 @@ tmux attach -t llava    # Ctrl-b 0/1/2/3 = capture/serve/vlm/npu-yolo
 
 ### 実行時に必要なもの（`~/yolotest` フォルダは不要）
 
-- Ryzen AI のインストール。有効化は **`scripts/rai_env.sh`** を source する。以下を順に試す:
-  1. **1.8** = `~/ryzenai_1_8/venv`（onnxruntime 1.27.0、`VitisAIExecutionProvider` 入り）
-     + XRT 2.25.37 / NPU スタック。RAI 1.8 には `setup_ryzenai_env.sh` が同梱されていないため、
-     このスクリプトが環境構築を肩代わりする。
-  2. **1.7.1** = `~/ryzenai/ryzenai_venv/setup_ryzenai_env.sh`（onnxruntime-vitisai 1.23.3 /
-     voe 1.7.1 + XRT 2.21）。1.8 に上げず 1.7.1 を修理して使っているマシン向けの互換経路。
-
-  両方ある場合は 1.8 を優先する（1.8 に移行したマシンにも 1.7.1 のディレクトリは残っているが、
-  その venv はもう起動しないため）。`RAI18_VENV` / `RAI171_SETUP` で上書き可能。
+- Ryzen AI 環境は `scripts/rai_env.sh` が 1.9、1.8、1.7.1 の順に探索します。1.9 の既定パスは `~/ryzenai_1_9/venv`（変更は `RAI19_VENV`）です。NPU 出力同期は yolodemo の検証済み Ryzen AI 1.9 / XRT 2.26.89 と 1.8 / XRT 2.25.37 のライブラリハッシュに対応し、未検証の組み合わせでは起動を停止します。1.7.1 は同期の検証対象外です。同期ライブラリの初回ビルドに `g++` と XRT ヘッダーが必要です。EPContext キャッシュはランタイムのハッシュを含めて再生成します。
+- 同期コードは [yolodemo](https://github.com/kotetsuy/yolodemo) から移植した AGPL-3.0-only のコードです。詳細は `src/npu_yolo/` 内の SPDX 表記と `licenses/AGPL-3.0.txt` を参照してください。
 - `models/yolo11m_a16w8.onnx`（コピー済み）— 1.7.1 で作ったモデルは 1.8 でもそのまま読めて動く。
   **アップグレード後の再量子化は不要**。
 - LLaVA の uv venv（npu 経路は `requests`=webrtc extra を使用）
@@ -384,7 +377,7 @@ Ubuntu を **26.04** へ、ROCm を **7.14** へアップグレードした直�
 **NPU Strix Halo（Firmware 1.1.2.65）** を認識する状態まで復旧した（根本原因と対処コマンドは
 [`TECHNICAL.md`](./TECHNICAL.md) の「NPU recovery」節を参照）。
 
-### 最終検証（再起動後、一般ユーザ `araki` で）— ✅ 全て合格
+### 最終検証（再起動後、一般ユーザ で）— ✅ 全て合格
 
 ```bash
 ulimit -l                                              # → unlimited                     ✅

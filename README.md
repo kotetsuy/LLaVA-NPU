@@ -350,16 +350,8 @@ plus "boxes in the right place in the browser".)
 
 ### What you need at runtime (the `~/yolotest` folder is not required)
 
-- A Ryzen AI installation, activated by **`scripts/rai_env.sh`**. It tries, in order:
-  1. **1.8** at `~/ryzenai_1_8/venv` (onnxruntime 1.27.0 with `VitisAIExecutionProvider`) +
-     the XRT 2.25.37 / NPU stack. RAI 1.8 ships no `setup_ryzenai_env.sh`, so the script
-     reproduces the environment itself.
-  2. **1.7.1** via `~/ryzenai/ryzenai_venv/setup_ryzenai_env.sh` (onnxruntime-vitisai 1.23.3 /
-     voe 1.7.1 + XRT 2.21) — kept so machines that repaired 1.7.1 instead of upgrading keep
-     working.
-
-  1.8 wins when both are present: an upgraded machine still has the 1.7.1 directory lying
-  around, but the venv behind it is dead. Override with `RAI18_VENV` / `RAI171_SETUP`.
+- `scripts/rai_env.sh` selects Ryzen AI 1.9, 1.8, then 1.7.1. The 1.9 path defaults to `~/ryzenai_1_9/venv` and can be overridden with `RAI19_VENV`. Output synchronization accepts the library hashes validated by yolodemo for Ryzen AI 1.9 / XRT 2.26.89 and 1.8 / XRT 2.25.37; unvalidated combinations, including 1.7.1, fail to start. Building the synchronization library requires `g++` and XRT headers. EPContext cache identity includes the runtime hashes.
+- The synchronization code is adapted from [yolodemo](https://github.com/kotetsuy/yolodemo), under AGPL-3.0-only; see its SPDX headers and `licenses/AGPL-3.0.txt`.
 - `models/yolo11m_a16w8.onnx` (already copied in) — the model produced under 1.7.1 loads and
   runs unchanged on 1.8; **no re-quantization is needed after the upgrade**.
 - LLaVA's uv venv (the npu path uses `requests` = the webrtc extra)
@@ -385,7 +377,7 @@ working. Three independent problems were isolated and fixed until, at ordinary u
 privilege, `xrt-smi examine` recognizes the **NPU Strix Halo (Firmware 1.1.2.65)**. See the
 "NPU recovery" section of [`TECHNICAL.md`](./TECHNICAL.md) for root causes and the fix commands.
 
-### Final verification (after reboot, as ordinary user `araki`) — ✅ all pass
+### Final verification (after reboot, as ordinary user) — ✅ all pass
 
 ```bash
 ulimit -l                                              # → unlimited                     ✅

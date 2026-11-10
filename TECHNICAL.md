@@ -523,15 +523,15 @@ Fix commands for problem B:
 #    are all cp312 wheels. Only the interpreter + stdlib were broken.
 #  - apt has no python3.12 on 26.04. Use the uv-managed 3.12.13 standalone.
 
-STD=/home/araki/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12
-VENV=/home/araki/ryzenai/ryzenai_venv/venv
+STD=$HOME/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12
+VENV=$HOME/ryzenai/ryzenai_venv/venv
 
 # Delete the old --copies binaries first, then recreate the venv (site-packages survive)
 rm -f "$VENV"/bin/python "$VENV"/bin/python3 "$VENV"/bin/python3.12
 "$STD" -m venv --without-pip "$VENV"     # regenerate bin/ as symlinks to the standalone
 
 # Verify: success if VitisAIExecutionProvider appears
-source /home/araki/ryzenai/ryzenai_venv/setup_ryzenai_env.sh
+source $HOME/ryzenai/ryzenai_venv/setup_ryzenai_env.sh
 python -c "import onnxruntime as ort, voe; print(ort.__version__, ort.get_available_providers())"
 #  → 1.23.3.dev...  ['VitisAIExecutionProvider', 'CPUExecutionProvider']
 ```

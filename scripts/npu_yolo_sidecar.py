@@ -2,7 +2,7 @@
 """NPU YOLO sidecar — runs object detection on the AMD XDNA2 NPU.
 
 This process is the NPU counterpart of ``src/inference/yolo_worker.py`` (which
-runs Ultralytics on the GPU). It must run under the **Ryzen AI 1.8 venv**, which
+runs Ultralytics on the GPU). It must run under the **Ryzen AI SDK venv**, which
 is the only environment that has the VitisAI EP + XRT:
 
     source ~/LLaVA-NPU/scripts/rai_env.sh
@@ -73,6 +73,8 @@ def _build_session(model_path: str, use_cpu: bool) -> ort.InferenceSession:
     so.log_severity_level = 3
     providers = ["CPUExecutionProvider"] if use_cpu else ["VitisAIExecutionProvider"]
     sess = ort.InferenceSession(model_path, sess_options=so, providers=providers, provider_options=[{}])
+    if not use_cpu and "VitisAIExecutionProvider" not in sess.get_providers():
+        raise RuntimeError("VitisAIExecutionProvider unavailable; refusing CPU fallback")
     log.info("onnxruntime session ready: providers=%s", sess.get_providers())
     return sess
 
@@ -84,12 +86,15 @@ def _ctx_stamp(src: Path) -> dict:
     loading one built by a different install fails a version check deep inside
     the EP. Compare a stamp up front instead of relying on that to be graceful.
     """
+    from src.npu_yolo.npu_output_sync import runtime_libraries, verify_libraries
+
     st = src.stat()
     return {
         "src_size": st.st_size,
         "src_mtime_ns": st.st_mtime_ns,
         "ort_version": ort.__version__,
         "rai_version": os.environ.get("RAI_VERSION", ""),
+        "runtime_hashes": verify_libraries(runtime_libraries()),
     }
 
 
@@ -164,6 +169,7 @@ def _inference_loop(
     imgsz: int,
     input_scale: float | None,
     input_zero_point: int,
+    sync=None,
 ) -> None:
     input_name = sess.get_inputs()[0].name
     split_output = len(sess.get_outputs()) == 2
@@ -172,7 +178,13 @@ def _inference_loop(
     # start publishing, and so /latest is populated promptly.
     dummy = np.zeros((1, 3, imgsz, imgsz), dtype=np.int16 if input_scale else np.float32)
     t0 = time.time()
-    sess.run(None, {input_name: dummy})
+    run = sync.run if sync else lambda session, inputs: session.run(None, inputs)
+    try:
+        run(sess, {input_name: dummy})
+    except Exception:
+        log.exception("warmup inference failed; stopping sidecar")
+        stop.set()
+        return
     log.info("warmup inference done in %.2fs", time.time() - t0)
     state.ready.set()
 
@@ -198,13 +210,15 @@ def _inference_loop(
             tensor, lb = preprocess(frame, imgsz)
             if input_scale is not None:
                 tensor = quantize_input(tensor, input_scale, input_zero_point)
-            outputs = sess.run(None, {input_name: tensor})
+            outputs = run(sess, {input_name: tensor})
             boxes = (decode_yolo26(outputs[0], outputs[1], lb, meta.frame_w, meta.frame_h, conf)
                      if split_output else
                      decode_detections(outputs[0], lb, meta.frame_w, meta.frame_h, conf, iou))
         except Exception as e:  # noqa: BLE001
-            log.warning("inference failed on seq=%d: %s", meta.seq, e)
-            continue
+            log.exception("inference failed on seq=%d; stopping sidecar", meta.seq)
+            state.ready.clear()
+            stop.set()
+            break
         state.set(_payload(meta, boxes))
 
         n += 1
@@ -278,6 +292,12 @@ def main() -> int:
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
 
+    sync = None
+    if not args.cpu:
+        from src.npu_yolo.npu_output_sync import bootstrap_output_sync, ensure_output_sync
+        bootstrap_output_sync()
+        sync = ensure_output_sync()
+
     log.info("loading model %s (cpu=%s)", args.model, args.cpu)
     metadata_path = Path(args.model).with_suffix(".json")
     input_scale = None
@@ -289,6 +309,8 @@ def main() -> int:
             input_zero_point = int(metadata["zero_point"])
     model = args.model if (args.cpu or args.no_ctx_cache) else _ensure_ep_context(args.model)
     sess = _build_session(model, args.cpu)
+    if sync:
+        sync.verify_loaded()
     input_type = sess.get_inputs()[0].type
     if (input_type == "tensor(int16)") != (input_scale is not None):
         raise ValueError(f"Input type {input_type} disagrees with {metadata_path}")
@@ -305,7 +327,7 @@ def main() -> int:
     state = _State()
     worker = threading.Thread(
         target=_inference_loop,
-        args=(sess, shm, state, stop, args.conf, args.iou, args.imgsz, input_scale, input_zero_point),
+        args=(sess, shm, state, stop, args.conf, args.iou, args.imgsz, input_scale, input_zero_point, sync),
         name="npu-yolo-infer",
         daemon=True,
     )

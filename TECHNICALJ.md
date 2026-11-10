@@ -514,15 +514,15 @@ NPU 自体の復旧後、`./start_all.sh` を初めて実行したところ 4 �
 #    すべて cp312 wheel。壊れていたのはインタプリタ + stdlib だけ。
 #  - apt には python3.12 が無い（26.04）。uv 管理の 3.12.13 standalone を使う。
 
-STD=/home/araki/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12
-VENV=/home/araki/ryzenai/ryzenai_venv/venv
+STD=$HOME/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12
+VENV=$HOME/ryzenai/ryzenai_venv/venv
 
 # 旧 --copies バイナリを消してから venv を作り直す（site-packages は消えない）
 rm -f "$VENV"/bin/python "$VENV"/bin/python3 "$VENV"/bin/python3.12
 "$STD" -m venv --without-pip "$VENV"     # bin/ を standalone への symlink で再生成
 
 # 検証: VitisAIExecutionProvider が出れば成功
-source /home/araki/ryzenai/ryzenai_venv/setup_ryzenai_env.sh
+source $HOME/ryzenai/ryzenai_venv/setup_ryzenai_env.sh
 python -c "import onnxruntime as ort, voe; print(ort.__version__, ort.get_available_providers())"
 #  → 1.23.3.dev...  ['VitisAIExecutionProvider', 'CPUExecutionProvider']
 ```

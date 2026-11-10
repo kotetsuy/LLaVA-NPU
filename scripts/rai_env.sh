@@ -3,26 +3,35 @@
 #
 #     source scripts/rai_env.sh
 #
-# Two installations are supported, tried in this order:
+# Installations are tried in this order:
 #
-#   1. Ryzen AI 1.8  — venv at ~/ryzenai_1_8/venv        (override: RAI18_VENV)
-#   2. Ryzen AI 1.7.1 — ~/ryzenai/ryzenai_venv/setup_ryzenai_env.sh
+#   1. Ryzen AI 1.9  — venv at ~/ryzenai_1_9/venv        (override: RAI19_VENV)
+#   2. Ryzen AI 1.8  — venv at ~/ryzenai_1_8/venv        (override: RAI18_VENV)
+#   3. Ryzen AI 1.7.1 — ~/ryzenai/ryzenai_venv/setup_ryzenai_env.sh
 #                                                        (override: RAI171_SETUP)
 #
-# 1.8 wins when both are present. A machine that upgraded to 1.8 still has the
+# The newest installed version wins. A machine that upgraded to 1.8 still has the
 # 1.7.1 directory (and its setup script) lying around, but the venv behind it is
 # dead — so "the file exists" is not evidence that 1.7.1 works. The 1.7.1 branch
 # is kept only for machines that repaired 1.7.1 instead of upgrading.
-# On success, RAI_VERSION is exported ("1.8" / "1.7.1").
+# On success, RAI_VERSION is exported ("1.9" / "1.8" / "1.7.1").
 #
 # Prerequisite: the memlock hard limit must not be 8192 KB, or XRT fails with
 # EAGAIN. ~/ryzenai_1_8/fix_memlock.sh raises it; it only takes effect in a
 # terminal opened afterwards.
 
+RAI19_VENV="${RAI19_VENV:-$HOME/ryzenai_1_9/venv}"
 RAI18_VENV="${RAI18_VENV:-$HOME/ryzenai_1_8/venv}"
 RAI171_SETUP="${RAI171_SETUP:-$HOME/ryzenai/ryzenai_venv/setup_ryzenai_env.sh}"
 
-if [[ -f "$RAI18_VENV/bin/activate" ]]; then
+if [[ -f "$RAI19_VENV/bin/activate" ]]; then
+    set +u
+    source /opt/xilinx/xrt/setup.sh >/dev/null
+    source "$RAI19_VENV/bin/activate"
+    export LD_LIBRARY_PATH="/opt/xilinx/xrt/lib:/lib/x86_64-linux-gnu:${RYZEN_AI_INSTALLATION_PATH}/onnxruntime/lib:${RYZEN_AI_INSTALLATION_PATH}/lib/python3.12/site-packages/lnx64.o/tools/peano/lib:${LD_LIBRARY_PATH:-}"
+    set -u
+    export RAI_VERSION=1.9
+elif [[ -f "$RAI18_VENV/bin/activate" ]]; then
     # Ryzen AI 1.8 ships no setup script of its own, so reproduce the
     # LD_LIBRARY_PATH construction from ~/ryzenai_1_8/run_quicktest.sh.
     set +u
@@ -65,6 +74,7 @@ elif [[ -f "$RAI171_SETUP" ]]; then
 
 else
     echo "ERROR: no Ryzen AI installation found." >&2
+    echo "       Looked for 1.9   at $RAI19_VENV/bin/activate" >&2
     echo "       Looked for 1.8   at $RAI18_VENV/bin/activate" >&2
     echo "       Looked for 1.7.1 at $RAI171_SETUP" >&2
     echo "       Set yolo.backend: gpu in config.yaml to use the GPU path instead." >&2

@@ -107,7 +107,7 @@ if [[ "$YOLO_BACKEND" == "npu" ]]; then
         echo "       Set yolo.backend: gpu in config.yaml to use the GPU path instead." >&2
         exit 1
     fi
-    # rai_env.sh picks Ryzen AI 1.8 or falls back to 1.7.1, and prints its own
+    # rai_env.sh picks Ryzen AI 1.9, 1.8, or 1.7.1, and prints its own
     # diagnosis to stderr if neither is usable. Run it in a subshell here so we
     # fail before tmux starts, instead of leaving a dead npu-yolo window behind.
     if ! RAI_VERSION="$(bash -c 'source "$1" >/dev/null && printf "%s" "$RAI_VERSION"' _ "$RAI_ENV")"; then
