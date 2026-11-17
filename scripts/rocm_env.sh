@@ -2,7 +2,7 @@
 # Source before building/running native gfx1151 binaries on ROCm 10.
 # ROCM_PATH may select another installation; never spoof the GPU architecture.
 unset HSA_OVERRIDE_GFX_VERSION
-export ROCM_PATH="${ROCM_PATH:-/opt/rocm}"
+export ROCM_PATH="${ROCM_PATH:-/opt/rocm/core-10.1}"
 export HIP_PATH="$ROCM_PATH"
 export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0}"
 export PATH="$ROCM_PATH/bin:$PATH"

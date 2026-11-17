@@ -32,7 +32,7 @@ def _has_japanese(text: str) -> bool:
 
 _RETRY_PROMPT = (
     "【日本語のみで回答してください】"
-    "この画像に写っているものや状況を、50字程度の自然な日本語1文で説明してください。"
+    "時間順の動画フレームに写る場面と動きを、50字程度の自然な日本語1文で説明してください。"
     "英語・ローマ字・他言語を含む回答は禁止です。日本語の文字のみで答えてください。"
 )
 
@@ -73,6 +73,8 @@ class VlmRunner:
         server_cfg = self._vlm_cfg.get("server", {})
         cadence = float(server_cfg.get("cadence_sec", 2.0))
         jpeg_quality = int(server_cfg.get("jpeg_quality", 90))
+        frame_count = max(1, int(server_cfg.get("frame_count", 4)))
+        frame_interval = max(0.1, float(server_cfg.get("frame_interval_sec", 1.0)))
 
         worker = VlmServerWorker(
             base_url=server_cfg.get("base_url", "http://127.0.0.1:8081"),
@@ -81,6 +83,7 @@ class VlmRunner:
             n_predict=self._vlm_cfg.get("n_predict", 96),
             temperature=self._vlm_cfg.get("temp", 0.2),
             jpeg_quality=jpeg_quality,
+            timeout=float(server_cfg.get("timeout_sec", 180)),
         )
 
         log.info("vlm-runner: waiting for llama-server at %s", worker.base_url)
@@ -141,8 +144,33 @@ class VlmRunner:
                     next_at = time.monotonic() + cadence
                     continue
 
+                frames = [jpeg.tobytes()]
+                last_seq = meta.seq
+                source_index = meta.source_index
+                for _ in range(frame_count - 1):
+                    if self._stop.wait(frame_interval):
+                        return
+                    got = shm.read()
+                    if got is None:
+                        continue
+                    next_frame, next_meta = got
+                    if not next_meta.connected or next_meta.source_index != source_index:
+                        frames = []
+                        break
+                    if next_meta.seq == last_seq:
+                        continue
+                    ok, encoded = cv2.imencode(
+                        ".jpg", next_frame, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
+                    )
+                    if ok:
+                        frames.append(encoded.tobytes())
+                        meta = next_meta
+                        last_seq = meta.seq
+                if not frames:
+                    next_at = time.monotonic() + cadence
+                    continue
                 t0 = time.monotonic()
-                result = worker.predict_jpeg(jpeg.tobytes())
+                result = worker.predict_frames(frames)
                 if (
                     result.returncode == 0
                     and result.caption
@@ -152,7 +180,7 @@ class VlmRunner:
                         "vlm-runner: non-Japanese caption %r — retrying with stricter prompt",
                         result.caption[:80],
                     )
-                    result = worker.predict_jpeg(jpeg.tobytes(), prompt=_RETRY_PROMPT)
+                    result = worker.predict_frames(frames, prompt=_RETRY_PROMPT)
                 inf_sec = time.monotonic() - t0
                 if result.returncode != 0:
                     log.warning(

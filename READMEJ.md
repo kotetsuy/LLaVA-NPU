@@ -1,4 +1,4 @@
-# LLaVA on ROCm — USB カメラ × YOLO11m × Nemotron Nano Omni × Chrome MJPEG
+# LLaVA on ROCm — カメラ × YOLO × Qwen3-VL × Chrome MJPEG
 
 > **ROCm 10 / gfx1151（Radeon 8060S）** は [起動手順](GFX1151_ROCM10.md) を参照してください。
 > 以下のROCm 7.2.1手順は旧環境の記録です。
@@ -8,7 +8,7 @@
 > での起動手順・検証結果は [HX370_ROCM10.md](./HX370_ROCM10.md) を参照。
 > 以下のNucBox EVO X2向け手順とは、モデル配置とROCmの導入済み環境が異なります。
 
-NucBox EVO X2 (Ryzen AI MAX+ 395 / Radeon 8060S, ROCm 7.2.1) 上で USB カメラ映像を Chrome ブラウザに MJPEG (`multipart/x-mixed-replace`) で配信し、同じ映像に対して YOLO11m の物体検出 (30fps) と Nemotron Nano Omni による日本語キャプション (0.5fps) をリアルタイムオーバーレイするデモ。
+NucBox EVO X2 上でカメラまたは動画の映像を Chrome に MJPEG で配信し、物体検出結果と Qwen3-VL による日本語キャプションを重ねて表示するデモ。キャプションは複数フレームの収集と推論を終えてから更新されるため、映像より遅れる。
 
 > **転送経路について**: もともと WebRTC (aiortc) を使っていましたが、完全オフライン環境 (Wi-Fi OFF / インターネット非接続) では Chrome が ICE host candidate を 1 件も emit しなくなり接続不能になる事象があったため、ICE を必要としない MJPEG over HTTP に移行しました。LAN 越し配信も plain HTTP なのでそのまま動作します。
 
@@ -106,25 +106,16 @@ export HIP_VISIBLE_DEVICES=0
 > シェルのプロファイルで export されている場合に備え、`start_all.sh` は明示的に
 > `unset` しています。
 
-### 7. Nemotron Nano Omni GGUF の準備
+### 7. Qwen3-VL-4B-Instruct GGUF の準備
 
 ```bash
-mkdir -p ~/nemotron-3
-cd ~/nemotron-3
-
-# unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF (Q4_K_XL)
-huggingface-cli download \
-  unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF \
-  NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf \
-  --local-dir Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF
-
-huggingface-cli download \
-  unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF \
-  mmproj-F16.gguf \
-  --local-dir Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF
+hf download Qwen/Qwen3-VL-4B-Instruct-GGUF \
+  Qwen3VL-4B-Instruct-Q4_K_M.gguf \
+  mmproj-Qwen3VL-4B-Instruct-F16.gguf \
+  --local-dir ~/qwen3
 ```
 
-合計 ~24.5 GB。`config.yaml` の `vlm.model` / `vlm.mmproj` のパスがこれと一致することを確認してください。
+モデル本体と画像エンコーダの合計は約3.3 GB。`config.yaml` の `vlm.model` / `vlm.mmproj` を保存先に合わせる。
 
 ### 8. (任意) GPU が見えていることを確認
 
@@ -149,7 +140,7 @@ cd ~/LLaVA
 1. tmux セッション `llava` を作成
 2. window 0: `uv run capture-run` (USB カメラ → SHM、Step 1+2)
 3. window 1: `uv run serve` (FastAPI + MJPEG `/stream.mjpg` + YOLO bbox + VLM caption WS、Step 6+7)
-4. window 2: `llama-server --reasoning off` (Nemotron 常駐、Step 7b)
+4. window 2: `llama-server --reasoning off` (Qwen3-VL 常駐、Step 7b)
 5. `http://localhost:8080/` がレスポンスを返すまで最大 30 秒待機
 6. Chrome を自動で開く
 
@@ -184,10 +175,10 @@ tmux attach -t llava            # ログを直接見る
 
 - 中央の `<img src="/stream.mjpg">` に USB カメラ映像 (1280x720, MJPEG)
 - 上に半透明 `<canvas>` で YOLO の bbox (色分け、30fps、`person 92%` 形式のラベル)
-- 下に半透明ボックスで Nemotron の日本語キャプション (約 50 字、2 秒ごとに更新)
+- 下に半透明ボックスで Qwen3-VL の日本語キャプション（約50字、更新間隔は推論時間に依存）
 - ステータス行にストリーム状態 / bbox WS / caption の inference 時間と t/s
 
-llama-server がモデルをロードする最初の ~10 秒は caption が `(no caption yet)` のまま、その後更新が始まります。
+モデルの読み込みと最初のフレーム収集・推論が完了するまでは caption が `(no caption yet)` のままです。
 
 ---
 
@@ -283,7 +274,7 @@ uv run python -c "from src.server.app import app; print('imports OK')"
 ## NPU バックエンド（YOLO11m を XDNA2 NPU で実行）
 
 YOLO11m の物体検出を、従来の **Ultralytics YOLO(GPU/ROCm, `yolo11m.pt`)** から
-**NPU 実行(VitisAI EP, `yolo11m_a16w8.onnx`)** に載せ替えられます。VLM(Nemotron)・カメラ・MJPEG 配信は無改修。
+**NPU 実行(VitisAI EP, `yolo11m_a16w8.onnx`)** に載せ替えられます。VLM・カメラ・MJPEG 配信は無改修。
 サイドカー方式（VLM の llama-server と同じ別プロセス+ローカルHTTP）で実装されており、`config.yaml` の
 `yolo.backend` を `npu`/`gpu` で切替でき、GPU 経路へのロールバックは一行です。
 アーキテクチャ・設計背景・実機検証の詳細は [`TECHNICAL.md`](./TECHNICAL.md) を参照。
@@ -393,3 +384,21 @@ source /opt/xilinx/xrt/setup.sh && xrt-smi examine     # [0000:c6:00.1] NPU Stri
 ## ライセンス
 
 [`LICENSE`](./LICENSE) を参照。
+
+### Qwen3-VL-4B-Instruct による動画フレーム解析
+
+このブランチは `~/qwen3` の Q4_K_M GGUF と F16 mmproj、および `~/nemotron-3-5-supervl` の llama.cpp HIP ビルドを使用します。`scripts/rocm_env.sh` は既定で ROCm 10.1 (`/opt/rocm/core-10.1`) を選択します。別の場所にある場合は `ROCM_PATH` を指定してください。
+
+`./start_all.sh --no-browser` で起動します。カメラ、またはカメラがない場合の `camera.playlist` の動画から、既定では1秒間隔で2フレームを取り、時間順にまとめて VLM に送信します。解析後に `cadence_sec` 秒待って次のフレームを収集します。フレーム数と間隔、HTTP タイムアウトは `vlm.server` で変更できます。動画全体を一度に入力する方式ではなく、短い区間を繰り返し解析します。推論時間やメモリ消費は画像数に依存します。
+
+#### フレーム数とキャプションの時間
+
+2026年11月17日に NucBox EVO X2 で、Qwen3-VL-4B-Instruct Q4_K_M、F16 mmproj、ROCm 10.1、NPU YOLO、動画プレイリストを使用して測定した。画像の収集間隔は1秒、推論後の `cadence_sec` は2秒。推論時間はアプリのキャプションログの値で、少数回の観測である。
+
+| フレーム数 | 推論時間の観測値 | 収集時間 | キャプション更新間隔の目安 |
+| --- | --- | --- | --- |
+| 2 | 約2.9秒 | 約1秒 | 約5.9秒 |
+| 3 | 約4.0秒 | 約2秒 | 約8.0秒 |
+| 4 | 約5.2〜5.8秒 | 約3秒 | 約10.2〜10.8秒 |
+
+更新間隔の目安は、推論時間に収集時間と推論後の待機2秒を足した値で、直接測定した表示間隔ではない。初回表示はこれにモデルの読み込み時間が加わる。表示時の映像とキャプションのずれは推論時間や配信遅延に左右され、キャプションは次の更新まで古くなる。映像の内容、負荷、フレーム取得失敗や日本語出力の再試行によっても時間は変動する。フレーム数を減らすと更新は速くなるが、動きの変化を判断する材料も減る。

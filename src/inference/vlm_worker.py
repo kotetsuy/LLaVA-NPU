@@ -196,20 +196,23 @@ class VlmServerWorker:
             return False
 
     def predict_jpeg(self, jpeg_bytes: bytes, prompt: str | None = None) -> VlmResult:
-        b64 = base64.b64encode(jpeg_bytes).decode("ascii")
+        return self.predict_frames([jpeg_bytes], prompt=prompt)
+
+    def predict_frames(self, frames: list[bytes], prompt: str | None = None) -> VlmResult:
+        if not frames:
+            raise ValueError("at least one frame is required")
+        content = [{"type": "text", "text": prompt if prompt is not None else self.prompt}]
+        for index, jpeg_bytes in enumerate(frames):
+            b64 = base64.b64encode(jpeg_bytes).decode("ascii")
+            content.append({"type": "text", "text": f"フレーム {index + 1}（時間順）:"})
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
         messages: list[dict] = []
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
         messages.append(
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt if prompt is not None else self.prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-                    },
-                ],
+                "content": content,
             }
         )
         body = {

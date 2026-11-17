@@ -66,15 +66,15 @@ server:
   ice_servers: []
 
 vlm:
-  # NVIDIA Nemotron-3 Nano Omni 30B-A3B (Reasoning, Q4_K_XL)
+  # Qwen3-VL-4B-Instruct (Q4_K_M)
   # Step 4 (subprocess) の互換用にバイナリ・モデルパスは残す
-  binary: ~/llama.cpp/build/bin/llama-mtmd-cli
-  model: ~/nemotron-3/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf
-  mmproj: ~/nemotron-3/mmproj-F16.gguf
+  binary: ~/nemotron-3-5-supervl/build-hip/bin/llama-mtmd-cli
+  model: ~/qwen3/Qwen3VL-4B-Instruct-Q4_K_M.gguf
+  mmproj: ~/qwen3/mmproj-Qwen3VL-4B-Instruct-F16.gguf
   # 出力言語を強制するため system / user の二段構え。
   # locale が en の環境でも英語に流されないよう、両方で日本語を明示する。
   system_prompt: "あなたは必ず日本語のみで応答する画像説明アシスタントです。英語や他の言語、ローマ字、英単語の混在を一切禁止します。出力は常に日本語の文字（ひらがな・カタカナ・漢字）と日本語の句読点のみで構成してください。"
-  prompt: "この画像に写っているものや状況を、50字程度の自然な日本語1文で具体的に説明してください。出力は必ず日本語のみとし、英語・ローマ字・他言語は使わないでください。"
+  prompt: "時間順に並んだ動画のフレームを見て、場面や動きの変化を50字程度の自然な日本語1文で具体的に説明してください。出力は必ず日本語のみとし、英語・ローマ字・他言語は使わないでください。"
   ngl: 99                  # 全レイヤーをGPUに乗せる
   ctx_size: 8192           # image embedding が長くなるため 4096 だと足りない場合あり
   n_predict: 128           # 50字程度の日本語 = ~60-100 token、余裕で 128
@@ -85,4 +85,7 @@ vlm:
   server:
     base_url: http://127.0.0.1:9931
     cadence_sec: 2.0       # キャプション間隔 (HANDOFF: 0.5fps)
+    frame_count: 2        # 時間順のフレームを一度に渡す
+    frame_interval_sec: 1.0
+    timeout_sec: 180
     jpeg_quality: 90       # SHM frame -> JPEG -> base64 -> server
