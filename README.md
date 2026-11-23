@@ -1,395 +1,158 @@
-# LLaVA on ROCm — USB camera × YOLO11m × Nemotron Nano Omni × Chrome MJPEG
+# LLaVA-NPU — Camera, YOLO26n and Nemotron Nano Omni
 
-> **ROCm 10 / gfx1151 (Radeon 8060S)**: see [setup guide](GFX1151_ROCM10.md).
-> The older ROCm 7.2.1 instructions below are historical.
+[日本語](READMEJ.md) · [Design handoff](HANDOFF.md) · [Technical notes](TECHNICAL.md)
 
+The demo streams a USB camera or a local video playlist over HTTP MJPEG, overlays object detections, and displays Japanese captions. By default, the XDNA2 NPU runs YOLO26n through a Ryzen AI sidecar, and the Radeon GPU runs Nemotron through a ROCm build of llama.cpp. The optional GPU detection backend uses YOLO11m through Ultralytics.
 
-> For the `hx370-gfx1150` branch on **Ryzen AI 9 HX 370 / Radeon 890M / ROCm 10**,
-> see [HX370_ROCM10.md](./HX370_ROCM10.md) (Japanese) for the verified setup,
-> model locations, and runtime results. The original EVO X2 instructions follow.
+## 1. Set up the application and GPU captioning
 
-A demo that runs on the NucBox EVO X2 (Ryzen AI MAX+ 395 / Radeon 8060S, ROCm 7.2.1): live USB-camera video is streamed to Chrome over MJPEG (`multipart/x-mixed-replace`), with real-time YOLO11m bbox overlay (30 fps) and Japanese captions from Nemotron Nano Omni (0.5 fps).
-
-> **Note on transport**: this used to be a WebRTC (aiortc) demo, but on fully-offline networks (Wi-Fi off / no Internet) Chrome refuses to emit a single ICE host candidate, leaving the connection stuck. We migrated to MJPEG over HTTP, which needs no ICE at all and works on the LAN unchanged.
-
-For design details see [`HANDOFF.md`](./HANDOFF.md) and [`TECHNICAL.md`](./TECHNICAL.md).
-日本語版は [`READMEJ.md`](./READMEJ.md) / [`HANDOFFJ.md`](./HANDOFFJ.md) / [`TECHNICALJ.md`](./TECHNICALJ.md).
-
----
-
-## Requirements
-
-| Item | Expected value |
-|------|------|
-| Machine | NucBox EVO X2 (AMD Ryzen AI MAX+ 395, gfx1151, 48 GB unified) |
-| OS | Ubuntu 24.04.4 LTS (HWE kernel) |
-| ROCm | 7.2.1 (symlinked at `/opt/rocm`) |
-| Python | 3.12 |
-| Package manager | `uv` (typically at `~/.local/bin/uv`) |
-| USB camera | Any UVC-compliant device |
-| Chrome | Any recent build (same machine or another LAN host) |
-
-The following must already be installed:
-
-- `uv` (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
-- `tmux` (`sudo apt install tmux`)
-- ROCm 7.2.1 (`sudo apt install rocm` or AMD's official path)
-- llama.cpp ROCm/HIP build (`~/llama.cpp/build/bin/llama-server` and `llama-mtmd-cli` already built)
-
----
-
-## Setup steps
-
-### 1. Clone the repository
+Use a Linux host with a supported AMD NPU, ROCm for the GPU, Python 3.12, [uv](https://docs.astral.sh/uv/getting-started/installation/), and a UVC camera or local video files. AMD's Ryzen AI 1.9 Linux instructions specify Ubuntu 24.04 LTS and kernel 6.10 or newer.
 
 ```bash
-git clone <this-repo-url> ~/LLaVA
-cd ~/LLaVA
+git clone --branch main --single-branch https://github.com/kotetsuy/LLaVA-NPU.git
+cd LLaVA-NPU
+sudo apt install tmux curl v4l-utils build-essential
+uv sync --locked --inexact --extra webrtc
 ```
 
-### 2. Python venv and base dependencies
+For Radeon 8060S (gfx1151), use the [ROCm 10 llama.cpp build instructions](GFX1151_ROCM10.md). For HX 370 (gfx1150), see the [branch-specific setup notes](HX370_ROCM10.md). Use the GPU build target for your hardware and use the NPU model paths and ports in this README for main.
+
+Download the `NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf` and matching `mmproj-F16.gguf` from the [Nemotron GGUF repository](https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF). The default directory for both is `~/nemotron-3/`. If you use another directory, set `vlm.model` and `vlm.mmproj` in `config.yaml`. Set `vlm.binary` to the path of `llama-mtmd-cli` in your build directory. The launcher looks for an executable `llama-server` in the same directory.
+
+## 2. Prepare the YOLO26n ONNX and JSON pair
+
+The ONNX and its matching JSON are local assets ignored by Git. A fresh checkout requires you to prepare both files. A public download location for the exact configured pair has not been verified. Obtain the pair through the maintainer or another authorized source, or generate a compatible pair as described below.
+
+```yaml
+yolo:
+  backend: npu
+  imgsz: 640
+  npu:
+    onnx: models/yolo26n-640-split-v3-a16w8-perchannel-int16.onnx
+    sidecar_url: http://127.0.0.1:8082
+    port: 8082
+```
+
+Merge these settings into the existing `yolo` section. The default filenames are
+
+```text
+models/yolo26n-640-split-v3-a16w8-perchannel-int16.onnx
+models/yolo26n-640-split-v3-a16w8-perchannel-int16.json
+```
+
+If you received the pair, run this from the repository root after replacing `/path/to/authorized-pair` with its directory.
 
 ```bash
-uv venv
-uv sync
+mkdir -p models
+install -m 0644 "/path/to/authorized-pair/yolo26n-640-split-v3-a16w8-perchannel-int16.onnx" models/
+install -m 0644 "/path/to/authorized-pair/yolo26n-640-split-v3-a16w8-perchannel-int16.json" models/
+python3 -m json.tool "models/yolo26n-640-split-v3-a16w8-perchannel-int16.json"
+sha256sum "models/yolo26n-640-split-v3-a16w8-perchannel-int16.onnx"
 ```
 
-This installs `numpy / opencv-python / pyyaml / pyudev` and gets you the state where Step 1 (USB → SHM) and Step 2 (hot-plug-aware CAL) work.
+If the JSON includes `model_sha256`, compare it with `sha256sum`; otherwise use the checksum supplied by the source, if available. Keep both files adjacent and give them the same basename if you change `yolo.npu.onnx`. The launcher checks for the ONNX and exits if it is missing. The sidecar reads the same-stem JSON and rejects an INT16 model when the required input quantization metadata is missing or inconsistent.
 
-### 3. ROCm PyTorch (required from Step 3 onwards)
+### Generating a compatible pair
 
-PyPI's `torch` is a CUDA build and won't work. Fetch the AMD ROCm wheels directly:
+1. Obtain the upstream [YOLO26n detection weights](https://docs.ultralytics.com/models/yolo26/) and representative calibration images you are authorized to use. Record their versions or hashes and the tool versions.
+2. Export a static batch-1 YOLO26n ONNX at 640×640. Extract the decoded XYXY boxes and post-sigmoid COCO class scores in that order, before the end-to-end Top-k. The sidecar expects shapes `[1,4,8400]` and `[1,80,8400]` and performs Top-k itself.
+3. Quantize the split graph with AMD Quark using A16W8 and per-channel weights. The related project uses MinMax calibration and CLE. Follow its [export, split, quantization and INT16 conversion source](https://github.com/kotetsuy/yolodemo/blob/28145ab6c20744af77f5f6a0d085d7b6cefa3b1c/scripts/prepare_models.py) as a reference for the stages. It targets 448×448 and requires adaptation for 640×640, including graph node names and output shapes. Its separate CPU classification head is outside this sidecar's model interface.
+4. Read the scalar scale and zero point from the input `QuantizeLinear` in the quantized graph before removing that node and exposing the external INT16 input `[1,3,640,640]`. Write a same-stem JSON object with `input_type` set to `"INT16"`, numeric `scale` from the conversion and integer `zero_point` from the conversion. Optionally record the final ONNX SHA-256 as `model_sha256`. Keep the values from that exact conversion.
+5. Compare the split outputs before and after INT16 input conversion on representative images, using equivalent FP32 and externally quantized inputs. Check both output shapes and compare decoded detections against the CPU reference on the target NPU. Then place the pair in `models/` and set `yolo.npu.onnx` to its path.
+
+Main provides no end-to-end 640×640 quantization recipe or calibration set. The exact original generation inputs and a bit-identical rebuild have not been verified. `scripts/export_yolo_onnx.py` is a regular ONNX exporter that defaults to the GPU model in `yolo.model`; it does not perform this split, quantization, or metadata generation.
+
+## 3. Install and check Ryzen AI 1.9
+
+1. Follow [AMD's Linux installation instructions](https://ryzenai.docs.amd.com/en/latest/linux.html) for Ryzen AI Software 1.9.0. Install the matching XRT 2.26.89 packages including the development headers, the AMD XDNA driver, and the Ryzen AI package in a dedicated Python 3.12 environment. Use `~/ryzenai_1_9/venv` as the installer target or export `RAI19_VENV` with the absolute venv path. Make custom paths available to the shell that runs the tmux sidecar too.
+2. For Ubuntu 26.04, see the [maintainer's 1.9 upgrade instructions](https://github.com/kotetsuy/ryzenai_1_9). They cover an upgrade from a working 1.8 installation, including archive names, driver packages and the installer command. AMD's official Linux procedure targets Ubuntu 24.04 LTS.
+3. Follow AMD's device permission setup and use [the maintainer's memlock setup example](https://qiita.com/kotetsu_yama/items/bb2ef5692b66ba87d90f) if the limit is low, then sign in again if you changed limits or group membership. Run the following as the normal launch user in a fresh shell. Confirm access to the NPU device and adequate soft and hard memlock limits. The launcher rejects the stock 8192 KiB hard limit.
+
+For the extracted Ryzen AI 1.9.0 tarball, run the installer as shown below. The installer creates the venv.
 
 ```bash
-mkdir -p ~/wheels && cd ~/wheels
-wget "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torch-2.9.1%2Brocm7.2.1.lw.gitff65f5bc-cp312-cp312-linux_x86_64.whl"
-wget "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torchvision-0.24.0%2Brocm7.2.1.gitb919bd0c-cp312-cp312-linux_x86_64.whl"
-wget "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torchaudio-2.9.0%2Brocm7.2.1.gite3c6ee2b-cp312-cp312-linux_x86_64.whl"
-wget "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/triton-3.5.1%2Brocm7.2.1.gita272dfa8-cp312-cp312-linux_x86_64.whl"
-
-cd ~/LLaVA
-uv pip install ~/wheels/torch-*.whl ~/wheels/torchvision-*.whl \
-               ~/wheels/torchaudio-*.whl ~/wheels/triton-*.whl
+# Run from the directory containing the extracted AMD installer.
+# -a yes accepts the AMD installer license.
+./install_ryzen_ai.sh -a yes -p "$HOME/ryzenai_1_9/venv"
 ```
-
-### 4. YOLO + ONNX (fallback plan)
 
 ```bash
-uv pip install -e .[yolo,onnx]
+(
+  source scripts/rai_env.sh || exit 1
+  test "$RAI_VERSION" = 1.9 || exit 1
+  python -c 'import numpy, onnxruntime as ort; p = ort.get_available_providers(); print(ort.__version__, p); assert "VitisAIExecutionProvider" in p' || exit 1
+  test -r /opt/xilinx/xrt/include/xrt/xrt_bo.h || exit 1
+  PYTHONPATH="$PWD" python -c 'from src.npu_yolo.npu_output_sync import runtime_libraries, verify_libraries; print(verify_libraries(runtime_libraries()))'
+)
+ls -l /dev/accel/
+ulimit -Sl
+ulimit -Hl
+/opt/xilinx/xrt/bin/xrt-smi examine
 ```
 
-This pulls in `ultralytics` (which auto-downloads YOLO11m on the first `predict`) and `onnx / onnxruntime` (CPU build).
-
-### 5. Server dependencies (FastAPI + uvicorn + requests)
+For the AMD tarball layout, run its supplied CNN quicktest and look for a positive `Actually running on NPU` count. Then check the LLaVA pipeline separately.
 
 ```bash
-uv pip install -e .[webrtc]
+(
+  source scripts/rai_env.sh || exit 1
+  test "$RAI_VERSION" = 1.9 || exit 1
+  cd "${RYZEN_AI_INSTALLATION_PATH}/quicktest" || exit 1
+  python quicktest.py
+)
 ```
 
-The extra is still named `webrtc` for historical reasons; the current server streams MJPEG, so `aiortc` is installed but effectively unused.
+`scripts/rai_env.sh` searches 1.9, 1.8 and 1.7.1 in order. The output synchronization shim accepts verified library hashes for 1.9 / XRT 2.26.89 and 1.8 / XRT 2.25.37. An unrecognized library combination stops the sidecar, including 1.7.1. The sidecar uses the Ryzen AI venv and the main application uses the project uv venv. Keep the vendor ONNX Runtime in the Ryzen AI venv.
 
-### 6. ROCm environment variables
+## 4. Start and verify the pipeline
 
-Add these to `~/.bashrc` so new shells pick them up automatically:
+Connect a camera. With `camera.fallback: any`, an eligible unlisted camera can be selected. For a camera-free run, create a local M3U8 playlist with paths to playable video files and set `camera.playlist` in `config.yaml` (default `videos/playlist.m3u8`). The playlist is used when no eligible camera is available.
 
 ```bash
-export ROCM_PATH=/opt/rocm
-export HIP_VISIBLE_DEVICES=0
+./start_all.sh --no-browser
+tmux list-windows -t llava
+tmux attach -t llava
 ```
 
-(`start_all.sh` re-exports these inside each tmux pane, so you're covered even if you forget to set them in your shell.)
-
-> **Do not set `HSA_OVERRIDE_GFX_VERSION`.** The ROCm wheels and the llama.cpp
-> build (`-DAMDGPU_TARGETS=gfx1150`) are native gfx1150 builds, so the override
-> buys nothing — and a stale value copied from an old runbook is fatal: with
-> `HSA_OVERRIDE_GFX_VERSION=11.0.0` the runtime reports `gfx1100` and every
-> kernel launch fails (`HIP error: invalid device function`). `start_all.sh`
-> explicitly `unset`s it in case a shell profile exports it.
-
-### 7. Fetch the Nemotron Nano Omni GGUF
+Windows 0–3 are `capture`, `serve`, `vlm`, and `npu-yolo`. Use Ctrl-b then the window number to switch, or Ctrl-b d to detach. After model compilation and warmup, run the checks below from another terminal. The URLs use the current default ports.
 
 ```bash
-mkdir -p ~/nemotron-3
-cd ~/nemotron-3
-
-# unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF (Q4_K_XL)
-huggingface-cli download \
-  unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF \
-  NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf \
-  --local-dir Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF
-
-huggingface-cli download \
-  unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF \
-  mmproj-F16.gguf \
-  --local-dir Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF
+curl -fsS http://127.0.0.1:9931/health
+curl -fsS http://127.0.0.1:8082/health
+curl -fsS http://127.0.0.1:8082/latest | python3 -m json.tool
+/opt/xilinx/xrt/bin/xrt-smi examine
 ```
 
-Around 24.5 GB total. Confirm that `vlm.model` / `vlm.mmproj` in `config.yaml` match these paths.
-
-### 8. (Optional) confirm the GPU is visible
+- Open `http://localhost:8080/` and confirm the video plays. Point the camera at a person or another recognizable object, or use a clip with one. Check that the boxes track the objects and that Japanese captions appear after the VLM loads.
+- Check that sidecar `/health` returns `{"ready":true}`. Repeat `/latest` and look for `connected: true`, advancing `frame_seq` and a populated `boxes` array with the known object in view. A 503 from `/latest` means no frame has been published yet.
+- Copy the NPU BDF from `xrt-smi examine`, then run the command below twice during live detection. Look for an active hardware context with increasing `Submissions` to confirm NPU execution.
 
 ```bash
-uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-# True AMD Radeon Graphics
+read -r -p 'NPU BDF: ' npu_bdf
+/opt/xilinx/xrt/bin/xrt-smi examine -d "$npu_bdf" -r all
 ```
 
----
+YOLO26n throughput and startup time for this combined pipeline are unverified here. The sidecar logs measured `inf/s` while frames are being processed.
 
-## Start / stop
-
-### One-shot launch (recommended)
-
-```bash
-cd ~/LLaVA
-./start_all.sh
-```
-
-This single command:
-
-1. Creates the tmux session `llava`
-2. window 0: `uv run capture-run` (USB → SHM, Steps 1+2)
-3. window 1: `uv run serve` (FastAPI + MJPEG `/stream.mjpg` + YOLO bbox + VLM caption WS, Steps 6+7)
-4. window 2: `llama-server --reasoning off` (resident Nemotron, Step 7b)
-5. Polls `http://localhost:8080/` for up to 30 seconds
-6. Opens Chrome automatically
-
-Options:
-
-```bash
-./start_all.sh --no-browser     # over SSH or when you don't want auto-open
-./start_all.sh --help
-```
-
-Attach to the session:
-
-```bash
-tmux attach -t llava            # watch logs
-# Ctrl-b 0 / 1 / 2 to switch windows
-# Ctrl-b d to detach but keep the session running
-```
-
-### Stop
-
-```bash
-./stop_all.sh
-```
-
-Sends `Ctrl-C` to each window, waits 5 seconds, then `tmux kill-session`. If anything survived, it falls through SIGINT → SIGKILL cleanup.
-
----
-
-## What you should see in the browser
-
-After `./start_all.sh`, open `http://localhost:8080/` in Chrome (or `http://<NucBox-IP>:8080/` from another LAN host):
-
-- An `<img src="/stream.mjpg">` showing the live camera (1280×720, MJPEG)
-- A semi-transparent `<canvas>` overlay with color-coded YOLO bboxes (30 fps; labels like `person 92%`)
-- A semi-transparent caption box below with the Nemotron Japanese caption (~50 chars, refreshed every 2 s)
-- A status row showing the stream state, bbox WS state, and the latest VLM `inference_ms` and `t/s`
-
-Captions stay at `(no caption yet)` for the first ~10 s while llama-server loads the GGUF, then updates kick in.
-
----
-
-## Step-by-step (for debugging)
-
-If you want to bring components up one at a time without `start_all.sh`:
-
-```bash
-# Steps 1+2: capture
-uv run capture-run                          # in another terminal
-uv run shm-reader-demo --ticks 10           # confirm SHM read path
-uv run shm-reader-demo --save /tmp/snap.jpg # save a single frame
-uv run list-cameras                         # list /dev/v4l devices
-
-# Step 3: YOLO standalone
-uv run benchmark-yolo --source synthetic    # synthetic 1280x720 noise
-uv run benchmark-yolo --source shm          # against the running capture-run
-uv run export-yolo-onnx --verify            # ONNX fallback
-
-# Step 4: VLM standalone (mtmd-cli subprocess)
-uv run benchmark-vlm --image /tmp/snap.jpg
-
-# Step 5: YOLO + VLM concurrent
-uv run benchmark-concurrent --frames 600
-uv run benchmark-concurrent --no-vlm        # baseline
-
-# Steps 6+7: server only
-uv run serve                                # ≈ T2
-~/llama.cpp/build/bin/llama-server -m ... --mmproj ... --reasoning off  # ≈ T3
-```
-
----
+Stop with `./stop_all.sh`.
 
 ## Troubleshooting
 
-### `uv run capture-run` doesn't see a camera
+- **No video**. Run `uv run --no-sync list-cameras` and `v4l2-ctl --list-devices`. Check camera priority and logs in the `capture` window, or check the playlist entries and paths.
+- **No detections**. Check `npu-yolo` for model, metadata, VitisAI and synchronization errors. Initial compilation can delay readiness. The sidecar writes a local `*_ctx.onnx` cache and a `*_ctx.json` stamp next to the model, keyed to the model and runtime. Give the launch user write access to that directory.
+- **No captions**. Check `vlm` for GGUF and ROCm errors, then check `serve` and `vlm.server.base_url`. The launcher passes `--reasoning off` to the VLM.
+- **Session already exists**. Attach with `tmux attach -t llava` or stop the session using `./stop_all.sh` before restarting.
+
+### Optional GPU detection with YOLO11m
+
+Stop the running pipeline and set `yolo.backend: gpu`. In the project venv, install the ROCm PyTorch and torchvision builds for your GPU and ROCm release **before** installing the YOLO extra. Then verify HIP and restart. Ultralytics can fetch the configured `yolo11m.pt` on first use if it is not already local.
 
 ```bash
-ls /dev/v4l/by-id              # is the USB camera symlinked?
-v4l2-ctl --list-devices        # (sudo apt install v4l-utils)
+source scripts/rocm_env.sh
+uv pip install -e '.[yolo]'
+uv run --no-sync python -c 'import torch; assert torch.version.hip and torch.cuda.is_available(); print(torch.cuda.get_device_name(0))'
+./start_all.sh --no-browser
 ```
-
-`camera.preferred` in `config.yaml` is an ordered priority list — add one entry per camera (`by_id` glob or `vid_pid`) and the highest-ranked connected one is shown. If none match, `fallback: any` still picks something (`fallback: none` refuses unlisted cameras). Cameras can be hot-swapped while running: unplug the active one and it reconnects to the next listed camera; plug in a higher-priority camera and it switches over automatically (set `preempt: false` to keep the current feed).
-
-### Browser shows a black image or status is stuck at `stream error`
-
-Hit `http://localhost:8080/stream.mjpg` directly and confirm a 200 with MJPEG bytes:
-
-- 200 + black frame → `capture-run` is probably stuck in SEARCHING. `tmux attach -t llava` and check window 0 (capture) for `-> CAPTURING dev=...` and `30 fps`. If absent, verify `config.yaml`'s `camera.preferred[].by_id` matches the symlink under `/dev/v4l/by-id/`.
-- 404 / 500 → inspect the `serve` window (`tmux attach -t llava` → Ctrl-b 1).
-- Can't reach it from another LAN host → open the firewall: `sudo ufw allow 8080`.
-
-### Caption stays empty (`(no caption yet)`)
-
-Either llama-server is still loading (~10 s the first time) or `--reasoning off` was forgotten. Check `serve`'s log via `tmux attach -t llava` → Ctrl-b 1:
-
-```
-vlm-runner: caption (1300ms) 'これは...'                  ← OK
-vlm-runner: empty caption after strip; raw='<think>...'   ← --reasoning off missing
-```
-
-### `start_all.sh` fails with "session already exists"
-
-```bash
-./stop_all.sh                  # stop first
-./start_all.sh                 # then restart
-```
-
-Or `tmux kill-session -t llava` to force-kill.
-
-### Model load is unusually slow (30+ s the first time)
-
-That's the time to pull the 21 GB GGUF off NVMe and into the page cache. Subsequent loads drop to ~10 s.
-
-### Switching YOLO from fp16 back to fp32
-
-Change `yolo.half: true` → `false` in `config.yaml`. fp32 has marginally better accuracy, but Step 5's concurrent benchmark showed fp16 leaves the VLM more headroom, so we default to fp16.
-
----
-
-## Self-checks during development
-
-```bash
-# Byte-compile every Python file
-python3 -m compileall -q src scripts && echo OK
-
-# Module import smoke (also resolves dependency closure)
-uv run python -c "from src.server.app import app; print('imports OK')"
-```
-
----
-
-## NPU backend (run YOLO11m on the XDNA2 NPU)
-
-YOLO11m object detection can be moved off the GPU (ROCm, `yolo11m.pt`) onto the
-**Strix Halo NPU (XDNA2, VitisAI EP, `yolo11m_a16w8.onnx`)**. The VLM (Nemotron),
-camera, and MJPEG delivery are untouched. It is implemented as a sidecar (a separate
-process talking local HTTP, exactly like the VLM's llama-server). Switch backends with
-`yolo.backend` in `config.yaml`; rolling back to the GPU path is a one-liner.
-See [`TECHNICAL.md`](./TECHNICAL.md) for architecture, design rationale, and on-device verification.
-
-### Results summary (what now works)
-
-| Item | Result |
-|---|---|
-| YOLO11m detection on the NPU | ✅ On bus.jpg, **4× person + 1× bus** (conf 0.89/0.89/0.89/0.75, bus 0.87) — matches yolotest's A16W8 |
-| NPU offload proven | ✅ `xrt-smi` shows **HW Context=Active, Columns[0-7], rising Submissions** |
-| Coordinate system (inverse letterbox) | ✅ bboxes map back to the input-frame coordinate system (≈1280×720); all boxes stay in-frame |
-| Throughput | ✅ ~28–29 inf/s after warmup (on par with yolotest; the 30 fps camera is naturally decimated by "process latest frame") |
-| Backend switch | ✅ `config.yaml` `yolo.backend: npu|gpu` — if npu misbehaves, just go back to gpu |
-| Client compatibility | ✅ bbox JSON schema and `/ws/bbox` are unchanged (the browser canvas needs no edits) |
-
-### Usage
-
-#### Switch backend (`config.yaml`)
-```yaml
-yolo:
-  backend: npu   # npu = XDNA2 NPU (VitisAI, separate process) / gpu = Ultralytics (ROCm, inside serve)
-```
-
-#### Start / stop
-```bash
-./start_all.sh          # with backend:npu, the npu-yolo window starts automatically too
-./stop_all.sh
-tmux attach -t llava    # Ctrl-b 0/1/2/3 = capture/serve/vlm/npu-yolo
-```
-Start order doesn't matter (serve retries over HTTP until the sidecar is up).
-
-#### Verify (on real hardware)
-```bash
-# With the sidecar running, confirm NPU offload from another terminal
-/opt/xilinx/xrt/bin/xrt-smi examine -d 0000:c6:00.1 -r all
-#  → HW Context=Active, Columns[0-7], rising Submissions = running on the NPU
-```
-Open `http://localhost:8080/` in the browser and eyeball that people/objects sit inside
-their bboxes. (The pass criterion is not "`Test Finished`" but "`xrt-smi` shows Active"
-plus "boxes in the right place in the browser".)
-
-### Operational notes (learned during implementation)
-
-- **First compile ~25 s, then ~0.7 s**: VitisAI compiles the quantized model for
-  `AMD_AIE2P_4x8_CMC_Overlay` at session-creation time. Ryzen AI 1.8 keeps nothing on disk
-  by itself (the 1.7.1 `cacheDir`/`cacheKey` provider options are no-ops there), so the
-  sidecar compiles once into `models/yolo11m_a16w8_ctx.onnx` — an EPContext model — and
-  reuses it on every later launch: session creation drops from ~25 s to ~0.7 s, with
-  bit-identical outputs and the same ~33 ms/inference. The cache is rebuilt automatically
-  when the source model, onnxruntime, or the Ryzen AI version changes (stamp:
-  `models/yolo11m_a16w8_ctx.json`); both files are gitignored. `--no-ctx-cache` opts out.
-  The sidecar only starts serving `/latest` **after warmup completes**, so serve simply
-  waits (bbox is empty, then starts appearing).
-- **Keep the venvs separate**: the sidecar runs under the RAI venv
-  (`source scripts/rai_env.sh`); serve runs under the uv venv. `start_all.sh` sources the
-  RAI env only in the sidecar window and does **not** apply the ROCm `ENV_PREFIX`
-  (`ROCM_PATH` / `HIP_VISIBLE_DEVICES` — the NPU doesn't need them).
-- **Sidecar launch command**: it runs under the RAI venv's python with `PYTHONPATH=<repo>`
-  (so it can import `src.capture.shm_writer` / `src.npu_yolo.postprocess`). It is **not** `uv run`.
-  `start_all.sh` assembles this form automatically.
-- **Rollback**: if the NPU misbehaves, set `yolo.backend: gpu` in `config.yaml`. The sidecar
-  is then not started and the legacy ultralytics/GPU path runs inside the serve process.
-
-### What you need at runtime (the `~/yolotest` folder is not required)
-
-- `scripts/rai_env.sh` selects Ryzen AI 1.9, 1.8, then 1.7.1. The 1.9 path defaults to `~/ryzenai_1_9/venv` and can be overridden with `RAI19_VENV`. Output synchronization accepts the library hashes validated by yolodemo for Ryzen AI 1.9 / XRT 2.26.89 and 1.8 / XRT 2.25.37; unvalidated combinations, including 1.7.1, fail to start. Building the synchronization library requires `g++` and XRT headers. EPContext cache identity includes the runtime hashes.
-- The synchronization code is adapted from [yolodemo](https://github.com/kotetsuy/yolodemo), under AGPL-3.0-only; see its SPDX headers and `licenses/AGPL-3.0.txt`.
-- `models/yolo11m_a16w8.onnx` (already copied in) — the model produced under 1.7.1 loads and
-  runs unchanged on 1.8; **no re-quantization is needed after the upgrade**.
-- LLaVA's uv venv (the npu path uses `requests` = the webrtc extra)
-
-`~/yolotest` is needed **only when re-quantizing** (below); normal operation never touches it.
-Both the model and the pre/post-processing code are vendored into the repo, so LLaVA-NPU is
-self-contained.
-
-#### When you need to re-quantize (normally unnecessary)
-Only if you want to rebuild the A16W8 model:
-```bash
-source ~/LLaVA-NPU/scripts/rai_env.sh
-python ~/yolotest/quantize_yolo11m_a16w8.py --input ~/yolo/yolo11m.onnx \
-    --output ~/LLaVA-NPU/models/yolo11m_a16w8.onnx --calib-dir ~/yolotest/calib2
-```
-
----
-
-## NPU recovery / operations notes (after an environment upgrade)
-
-Right after upgrading Ubuntu to **26.04** and ROCm to **7.14**, the NPU (`amdxdna`) can stop
-working. Three independent problems were isolated and fixed until, at ordinary user
-privilege, `xrt-smi examine` recognizes the **NPU Strix Halo (Firmware 1.1.2.65)**. See the
-"NPU recovery" section of [`TECHNICAL.md`](./TECHNICAL.md) for root causes and the fix commands.
-
-### Final verification (after reboot, as ordinary user) — ✅ all pass
-
-```bash
-ulimit -l                                              # → unlimited                     ✅
-ls -l /dev/accel/accel0                                # crw-rw-rw-+ root render 261,0    ✅
-source /opt/xilinx/xrt/setup.sh && xrt-smi examine     # [0000:c6:00.1] NPU Strix Halo    ✅
-```
-
-If all three pass without `sudo`, the YOLO11m NPU pipeline (`start_all.sh` /
-`scripts/npu_yolo_sidecar.py`) can be run at ordinary user privilege.
-
----
 
 ## License
 
-See [`LICENSE`](./LICENSE).
+See [LICENSE](LICENSE). The NPU output synchronization code is adapted from [yolodemo](https://github.com/kotetsuy/yolodemo) under AGPL-3.0-only. See the source SPDX headers and [AGPL-3.0 text](licenses/AGPL-3.0.txt).

@@ -1,395 +1,158 @@
-# LLaVA on ROCm — USB カメラ × YOLO11m × Nemotron Nano Omni × Chrome MJPEG
+# LLaVA-NPU ― カメラ・YOLO26n・Nemotron Nano Omni
 
-> **ROCm 10 / gfx1151（Radeon 8060S）** は [起動手順](GFX1151_ROCM10.md) を参照してください。
-> 以下のROCm 7.2.1手順は旧環境の記録です。
+[English](README.md) · [設計引き継ぎ](HANDOFFJ.md) · [技術資料](TECHNICALJ.md)
 
+USBカメラまたはローカル動画のプレイリストをHTTP MJPEGで配信し、検出枠と日本語キャプションを重ねるデモです。既定ではRyzen AIのサイドカーがXDNA2 NPUでYOLO26nを実行し、ROCm版llama.cppがRadeon GPUでNemotronを実行します。物体検出をGPUに切り替えた場合はUltralyticsのYOLO11mを使います。
 
-> `hx370-gfx1150` ブランチの **Ryzen AI 9 HX 370 / Radeon 890M / ROCm 10**
-> での起動手順・検証結果は [HX370_ROCM10.md](./HX370_ROCM10.md) を参照。
-> 以下のNucBox EVO X2向け手順とは、モデル配置とROCmの導入済み環境が異なります。
+## 1. アプリとGPUキャプションの準備
 
-NucBox EVO X2 (Ryzen AI MAX+ 395 / Radeon 8060S, ROCm 7.2.1) 上で USB カメラ映像を Chrome ブラウザに MJPEG (`multipart/x-mixed-replace`) で配信し、同じ映像に対して YOLO11m の物体検出 (30fps) と Nemotron Nano Omni による日本語キャプション (0.5fps) をリアルタイムオーバーレイするデモ。
-
-> **転送経路について**: もともと WebRTC (aiortc) を使っていましたが、完全オフライン環境 (Wi-Fi OFF / インターネット非接続) では Chrome が ICE host candidate を 1 件も emit しなくなり接続不能になる事象があったため、ICE を必要としない MJPEG over HTTP に移行しました。LAN 越し配信も plain HTTP なのでそのまま動作します。
-
-設計の詳細は [`HANDOFFJ.md`](./HANDOFFJ.md) と [`TECHNICALJ.md`](./TECHNICALJ.md) を参照。
-
----
-
-## 必要なもの
-
-| 項目 | 想定値 |
-|------|------|
-| マシン | NucBox EVO X2 (AMD Ryzen AI MAX+ 395, gfx1151, 48GB unified) |
-| OS | Ubuntu 24.04.4 LTS (HWE kernel) |
-| ROCm | 7.2.1 (`/opt/rocm` symlink) |
-| Python | 3.12 |
-| パッケージ管理 | `uv` (ローカル: `~/.local/bin/uv`) |
-| USB カメラ | UVC 対応のもの 1 台 |
-| Chrome | 任意の最近のバージョン (同一マシンまたは LAN 内の別端末) |
-
-事前にインストール済みであることを期待:
-
-- `uv` (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
-- `tmux` (`sudo apt install tmux`)
-- ROCm 7.2.1 (`sudo apt install rocm` 等、AMD 公式手順)
-- llama.cpp ROCm/HIP ビルド (`~/llama.cpp/build/bin/llama-server` と `llama-mtmd-cli` がビルド済み)
-
----
-
-## セットアップ手順
-
-### 1. リポジトリ取得
+対応するAMD NPUとROCm対応GPUを備えるLinuxマシン、Python 3.12、[uv](https://docs.astral.sh/uv/getting-started/installation/)、UVCカメラまたはローカル動画を用意します。AMDのRyzen AI 1.9向けLinux手順ではUbuntu 24.04 LTSとカーネル6.10以上が前提です。
 
 ```bash
-git clone <this-repo-url> ~/LLaVA
-cd ~/LLaVA
+git clone --branch main --single-branch https://github.com/kotetsuy/LLaVA-NPU.git
+cd LLaVA-NPU
+sudo apt install tmux curl v4l-utils build-essential
+uv sync --locked --inexact --extra webrtc
 ```
 
-### 2. Python 仮想環境と基本依存
+Radeon 8060S（gfx1151）は[ROCm 10でのllama.cppビルド手順](GFX1151_ROCM10.md)、HX 370（gfx1150）は[ブランチ固有のセットアップ情報](HX370_ROCM10.md)を参照してください。GPUのビルドターゲットは機種に合わせ、mainのNPUモデルパスとポートはこのREADMEに従ってください。
+
+[Nemotron GGUFリポジトリ](https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF)から `NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf` と対応する `mmproj-F16.gguf` を取得します。既定の配置先は両方とも `~/nemotron-3/` です。別の場所に置く場合は `config.yaml` の `vlm.model` と `vlm.mmproj` を変更します。`vlm.binary` はビルド先の `llama-mtmd-cli` を指すように設定します。起動スクリプトは同じディレクトリにある実行可能な `llama-server` を使います。
+
+## 2. YOLO26nのONNXとJSONを準備
+
+ONNXと対応するJSONはローカルに配置するファイルで、Gitの管理対象外です。新規クローンでは両方の準備が必要です。既定の組み合わせを入手できる公開配布先は確認できていません。メンテナーなど正規の提供元から一組で受け取るか、以下を参考に互換モデルを生成してください。
+
+```yaml
+yolo:
+  backend: npu
+  imgsz: 640
+  npu:
+    onnx: models/yolo26n-640-split-v3-a16w8-perchannel-int16.onnx
+    sidecar_url: http://127.0.0.1:8082
+    port: 8082
+```
+
+上記は既存の `yolo` セクションに反映します。既定の配置先は次の2ファイルです。
+
+```text
+models/yolo26n-640-split-v3-a16w8-perchannel-int16.onnx
+models/yolo26n-640-split-v3-a16w8-perchannel-int16.json
+```
+
+一組で受け取った場合は、`/path/to/authorized-pair` を実際の入手先ディレクトリに置き換え、リポジトリのルートで実行します。
 
 ```bash
-uv venv
-uv sync
+mkdir -p models
+install -m 0644 "/path/to/authorized-pair/yolo26n-640-split-v3-a16w8-perchannel-int16.onnx" models/
+install -m 0644 "/path/to/authorized-pair/yolo26n-640-split-v3-a16w8-perchannel-int16.json" models/
+python3 -m json.tool "models/yolo26n-640-split-v3-a16w8-perchannel-int16.json"
+sha256sum "models/yolo26n-640-split-v3-a16w8-perchannel-int16.onnx"
 ```
 
-これで `numpy / opencv-python / pyyaml / pyudev` がインストールされ、Step 1 (USB カメラ → SHM) と Step 2 (ホットプラグ対応 CAL) が動く状態になります。
+JSONに `model_sha256` があれば `sha256sum` の結果と照合します。記載がなければ、提供元が公開したチェックサムがある場合に照合してください。`yolo.npu.onnx` を変更する場合も、同じディレクトリにベース名が同じJSONを置きます。起動スクリプトはONNXが見つからないと終了します。サイドカーは同名のJSONを読み、INT16入力に必要な量子化情報が欠けていたり、入力型と一致しなかったりすると起動に失敗します。
 
-### 3. ROCm 版 PyTorch (Step 3 以降に必要)
+### 互換モデルを生成する場合
 
-PyPI の torch は CUDA 版なので使えません。AMD の ROCm wheel を直接 `wget` してインストール:
+1. [公式のYOLO26n物体検出用重み](https://docs.ultralytics.com/models/yolo26/)と、利用許可のある代表的な校正画像を用意します。重みと画像の版またはハッシュ、ツールの版を記録します。
+2. バッチ1・640×640固定でYOLO26nをONNXにエクスポートし、end-to-endのTop-kより手前で、デコード済みのXYXY座標とSigmoid適用後のCOCOクラススコアをこの順で切り出します。サイドカーが要求する出力形状は `[1,4,8400]` と `[1,80,8400]` で、Top-kはサイドカーが処理します。
+3. 分割したONNXをAMD QuarkでA16W8・重みper-channelに量子化します。関連プロジェクトはMinMax校正とCLEを使用しています。[yolodemoのエクスポート・分割・量子化・INT16変換コード](https://github.com/kotetsuy/yolodemo/blob/28145ab6c20744af77f5f6a0d085d7b6cefa3b1c/scripts/prepare_models.py)で各工程を確認できます。このコードは448×448用なので、グラフのノード名や出力形状を含め640×640向けに調整します。CPU分類ヘッドを別ファイルにする構成は、このサイドカーのモデル仕様には含まれません。
+4. 量子化後のグラフで入力の `QuantizeLinear` からスカラーのscaleとzero pointを取得します。そのノードを外して外部INT16入力 `[1,3,640,640]` を公開し、ONNXと同名のJSONに `input_type` として `"INT16"`、`scale` として取得した数値、`zero_point` として取得した整数を保存します。最終ONNXのSHA-256は任意で `model_sha256` に記録できます。量子化パラメーターは変換したモデルに対応する値を使います。
+5. 代表画像について、変換前のFP32入力と変換後の外部量子化入力で、両方の出力形状と結果が一致することを確認します。対象NPUで実行した検出結果もCPU参照と比較します。検証後、ペアを `models/` に置き、`yolo.npu.onnx` をそのパスに設定します。
+
+mainには640×640用の一括量子化レシピや校正画像一式がありません。既定ファイルを生成した入力一式と、バイト単位で一致する再生成手順は未確認です。`scripts/export_yolo_onnx.py` は通常のONNXエクスポーターで、既定では `yolo.model` のGPU用モデルを読みます。出力分割・量子化・JSON生成には対応していません。
+
+## 3. Ryzen AI 1.9の導入と確認
+
+1. [AMDのLinuxインストール手順](https://ryzenai.docs.amd.com/en/latest/linux.html)に従い、Ryzen AI Software 1.9.0、開発ヘッダーを含むXRT 2.26.89の関連パッケージとAMD XDNAドライバーを導入します。Ryzen AIはPython 3.12の専用環境に導入します。インストーラーの既定の配置先として `~/ryzenai_1_9/venv` を指定するか、別の場所ならvenvの絶対パスを `RAI19_VENV` にエクスポートします。別パスはtmuxのサイドカーを実行するシェルからも参照できるようにします。
+2. Ubuntu 26.04の場合は[メンテナーによる1.9への更新手順](https://github.com/kotetsuy/ryzenai_1_9)を参照してください。動作済みの1.8からの更新を対象とし、アーカイブ名、ドライバーパッケージ、インストーラーの実行例を掲載しています。AMD公式のLinux手順はUbuntu 24.04 LTS向けです。
+3. AMDの手順に沿ってデバイスアクセスを設定し、memlockが低い場合は[メンテナーの設定例](https://qiita.com/kotetsu_yama/items/bb2ef5692b66ba87d90f)を参照します。上限やグループを変更したら再ログインし、起動に使う一般ユーザーの新しいシェルで以下を確認します。NPUへのアクセスとmemlockのソフト・ハード上限を確認してください。ハード上限が既定の8192 KiBだと起動スクリプトが停止します。
+
+Ryzen AI 1.9.0のtarballを展開した場合のインストーラー実行例です。venvはインストーラーが作成します。
 
 ```bash
-mkdir -p ~/wheels && cd ~/wheels
-wget "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torch-2.9.1%2Brocm7.2.1.lw.gitff65f5bc-cp312-cp312-linux_x86_64.whl"
-wget "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torchvision-0.24.0%2Brocm7.2.1.gitb919bd0c-cp312-cp312-linux_x86_64.whl"
-wget "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/torchaudio-2.9.0%2Brocm7.2.1.gite3c6ee2b-cp312-cp312-linux_x86_64.whl"
-wget "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/triton-3.5.1%2Brocm7.2.1.gita272dfa8-cp312-cp312-linux_x86_64.whl"
-
-cd ~/LLaVA
-uv pip install ~/wheels/torch-*.whl ~/wheels/torchvision-*.whl \
-               ~/wheels/torchaudio-*.whl ~/wheels/triton-*.whl
+# AMDのインストーラーを展開したディレクトリで実行。
+# -a yes はAMDのライセンスへの同意を示す。
+./install_ryzen_ai.sh -a yes -p "$HOME/ryzenai_1_9/venv"
 ```
-
-### 4. YOLO + ONNX (退避プラン用)
 
 ```bash
-uv pip install -e .[yolo,onnx]
+(
+  source scripts/rai_env.sh || exit 1
+  test "$RAI_VERSION" = 1.9 || exit 1
+  python -c 'import numpy, onnxruntime as ort; p = ort.get_available_providers(); print(ort.__version__, p); assert "VitisAIExecutionProvider" in p' || exit 1
+  test -r /opt/xilinx/xrt/include/xrt/xrt_bo.h || exit 1
+  PYTHONPATH="$PWD" python -c 'from src.npu_yolo.npu_output_sync import runtime_libraries, verify_libraries; print(verify_libraries(runtime_libraries()))'
+)
+ls -l /dev/accel/
+ulimit -Sl
+ulimit -Hl
+/opt/xilinx/xrt/bin/xrt-smi examine
 ```
 
-`ultralytics` (YOLO11m を初回 predict 時に自動ダウンロード) と `onnx / onnxruntime` (CPU 版) が入ります。
-
-### 5. サーバ依存 (FastAPI + uvicorn + requests)
+AMDのtarball版では付属のCNN quicktestを実行し、`Actually running on NPU` の件数が1以上であることを確認してから、アプリを起動します。
 
 ```bash
-uv pip install -e .[webrtc]
+(
+  source scripts/rai_env.sh || exit 1
+  test "$RAI_VERSION" = 1.9 || exit 1
+  cd "${RYZEN_AI_INSTALLATION_PATH}/quicktest" || exit 1
+  python quicktest.py
+)
 ```
 
-extra 名は歴史的経緯で `webrtc` のままですが、現行サーバは MJPEG 配信なので aiortc は実質未使用です (依存解決のために一緒にインストールされるだけ)。
+`scripts/rai_env.sh` は1.9、1.8、1.7.1の順に探します。出力同期処理は1.9／XRT 2.26.89と1.8／XRT 2.25.37の検証済みライブラリハッシュに対応します。1.7.1を含め、照合に失敗する組み合わせではサイドカーが停止します。サイドカーにはRyzen AIのvenv、本体にはプロジェクトのuv環境を使います。Ryzen AIのvenvにはベンダー版ONNX Runtimeを保持してください。
 
-### 6. ROCm 環境変数
+## 4. 起動と動作確認
 
-`~/.bashrc` などに追加して、新しいシェルで自動的に効くようにしておくと楽:
+カメラを接続します。`camera.fallback: any` なら優先リストにないカメラも選択できます。カメラなしで試す場合は、再生可能な動画ファイルのパスを記載したローカルM3U8を作り、`config.yaml` の `camera.playlist`（既定は `videos/playlist.m3u8`）を設定します。利用可能なカメラがない場合にプレイリストが使われます。
 
 ```bash
-export ROCM_PATH=/opt/rocm
-export HIP_VISIBLE_DEVICES=0
+./start_all.sh --no-browser
+tmux list-windows -t llava
+tmux attach -t llava
 ```
 
-(`start_all.sh` は内部で再 export するので、シェル設定を忘れていても tmux セッションでは効きます。)
-
-> **`HSA_OVERRIDE_GFX_VERSION` は設定しないこと。** ROCm wheel も llama.cpp
-> (`-DAMDGPU_TARGETS=gfx1150`) も gfx1150 ネイティブビルドなので、override を付けても
-> 得るものはありません。逆に古い手順書からコピーした値が残っていると致命的で、
-> `HSA_OVERRIDE_GFX_VERSION=11.0.0` だとランタイムが `gfx1100` として認識し、
-> カーネル起動がすべて失敗します (`HIP error: invalid device function`)。
-> シェルのプロファイルで export されている場合に備え、`start_all.sh` は明示的に
-> `unset` しています。
-
-### 7. Nemotron Nano Omni GGUF の準備
+ウィンドウ0〜3は `capture`、`serve`、`vlm`、`npu-yolo` です。Ctrl-bのあとに数字で切り替え、Ctrl-b dでデタッチできます。モデルのコンパイルとウォームアップ後、別ターミナルで以下を実行します。URLはmainの既定ポートです。
 
 ```bash
-mkdir -p ~/nemotron-3
-cd ~/nemotron-3
-
-# unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF (Q4_K_XL)
-huggingface-cli download \
-  unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF \
-  NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf \
-  --local-dir Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF
-
-huggingface-cli download \
-  unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF \
-  mmproj-F16.gguf \
-  --local-dir Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF
+curl -fsS http://127.0.0.1:9931/health
+curl -fsS http://127.0.0.1:8082/health
+curl -fsS http://127.0.0.1:8082/latest | python3 -m json.tool
+/opt/xilinx/xrt/bin/xrt-smi examine
 ```
 
-合計 ~24.5 GB。`config.yaml` の `vlm.model` / `vlm.mmproj` のパスがこれと一致することを確認してください。
-
-### 8. (任意) GPU が見えていることを確認
+- `http://localhost:8080/` を開いて映像を確認します。人物など検出しやすい対象を映すか、その対象が写った動画を使い、検出枠の位置と、VLMロード後に日本語キャプションが出ることを確認します。
+- サイドカーの `/health` が `{"ready":true}` を返すことを確認します。`/latest` を繰り返し取得し、`connected: true`、増加する `frame_seq`、対象が映っているときに `boxes` に検出結果が入ることを確認します。`/latest` が503の場合は、まだフレーム結果が公開されていません。
+- `xrt-smi examine` に表示されたNPUのBDFを使い、検出中に下記を2回実行します。ハードウェアコンテキストがActiveで、`Submissions` が増えていればNPU実行を確認できます。
 
 ```bash
-uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-# True AMD Radeon Graphics
+read -r -p 'NPU BDF: ' npu_bdf
+/opt/xilinx/xrt/bin/xrt-smi examine -d "$npu_bdf" -r all
 ```
 
----
+この統合構成でのYOLO26nのスループットと起動時間は未確認です。推論中の実測値はサイドカーのログに `inf/s` で出力されます。
 
-## 起動と停止
-
-### 一括起動 (推奨)
-
-```bash
-cd ~/LLaVA
-./start_all.sh
-```
-
-これだけで:
-
-1. tmux セッション `llava` を作成
-2. window 0: `uv run capture-run` (USB カメラ → SHM、Step 1+2)
-3. window 1: `uv run serve` (FastAPI + MJPEG `/stream.mjpg` + YOLO bbox + VLM caption WS、Step 6+7)
-4. window 2: `llama-server --reasoning off` (Nemotron 常駐、Step 7b)
-5. `http://localhost:8080/` がレスポンスを返すまで最大 30 秒待機
-6. Chrome を自動で開く
-
-オプション:
-
-```bash
-./start_all.sh --no-browser     # SSH 越しなどで自動 open 不要なとき
-./start_all.sh --help
-```
-
-セッションへの接続:
-
-```bash
-tmux attach -t llava            # ログを直接見る
-# Ctrl-b 0 / 1 / 2 で window 切替
-# Ctrl-b d でセッションを生かしたまま離脱
-```
-
-### 停止
-
-```bash
-./stop_all.sh
-```
-
-各 window に `Ctrl-C` を送って 5 秒待ち、そのあと `tmux kill-session`。万一プロセスが残っていれば SIGINT → SIGKILL の段階で後始末します。
-
----
-
-## ブラウザで確認
-
-`./start_all.sh` 実行後、Chrome で `http://localhost:8080/` (または LAN 内別端末から `http://<NucBox の IP>:8080/`) を開くと:
-
-- 中央の `<img src="/stream.mjpg">` に USB カメラ映像 (1280x720, MJPEG)
-- 上に半透明 `<canvas>` で YOLO の bbox (色分け、30fps、`person 92%` 形式のラベル)
-- 下に半透明ボックスで Nemotron の日本語キャプション (約 50 字、2 秒ごとに更新)
-- ステータス行にストリーム状態 / bbox WS / caption の inference 時間と t/s
-
-llama-server がモデルをロードする最初の ~10 秒は caption が `(no caption yet)` のまま、その後更新が始まります。
-
----
-
-## ステップごとの個別実行 (デバッグ用)
-
-`start_all.sh` を使わず一つずつ起動したいとき:
-
-```bash
-# Step 1+2: capture
-uv run capture-run                          # 別ターミナル
-uv run shm-reader-demo --ticks 10           # SHM 読出しのみ確認
-uv run shm-reader-demo --save /tmp/snap.jpg # 1 枚保存
-uv run list-cameras                         # /dev/v4l デバイス一覧
-
-# Step 3: YOLO 単独
-uv run benchmark-yolo --source synthetic    # synthetic 1280x720 ノイズ
-uv run benchmark-yolo --source shm          # 上の capture を起動した上で
-uv run export-yolo-onnx --verify            # ONNX 退避プラン
-
-# Step 4: VLM 単独 (mtmd-cli subprocess)
-uv run benchmark-vlm --image /tmp/snap.jpg
-
-# Step 5: YOLO + VLM 同居
-uv run benchmark-concurrent --frames 600
-uv run benchmark-concurrent --no-vlm        # baseline
-
-# Step 6+7: サーバ単体起動
-uv run serve                                # T2 相当
-~/llama.cpp/build/bin/llama-server -m ... --mmproj ... --reasoning off  # T3 相当
-```
-
----
+停止は `./stop_all.sh` を実行します。
 
 ## トラブルシューティング
 
-### `uv run capture-run` でカメラが見つからない
+- **映像が出ない**場合は `uv run --no-sync list-cameras` と `v4l2-ctl --list-devices` でカメラを探します。`capture` ウィンドウのログと優先設定、動画を使う場合はプレイリストと動画パスを確認します。
+- **検出枠が出ない**場合は、`npu-yolo` のログでモデル、JSON、VitisAI、出力同期のエラーを確認します。初回はコンパイル完了を待ちます。サイドカーはモデルとランタイムに対応する `*_ctx.onnx` と `*_ctx.json` をモデルの隣に生成するため、起動ユーザーにはそのディレクトリへの書き込み権限が必要です。
+- **字幕が出ない**場合は、`vlm` でGGUFとROCmのエラーを確認し、`serve` のログと `vlm.server.base_url` を照合します。起動スクリプトはVLMに `--reasoning off` を渡します。
+- **セッションが既にある**場合は、`tmux attach -t llava` で既存のセッションに接続するか、`./stop_all.sh` で停止してから起動し直します。
+
+### GPUでYOLO11mを使う場合
+
+稼働中のパイプラインを止め、`yolo.backend: gpu` に変更します。プロジェクトのuv環境に、GPUとROCmの版に合うPyTorchとtorchvisionを先に入れてから、YOLOの追加依存を入れてHIPを確認します。設定された `yolo11m.pt` がローカルにない場合は、Ultralyticsが初回使用時に取得できます。
 
 ```bash
-ls /dev/v4l/by-id              # USB カメラの symlink が出るか
-v4l2-ctl --list-devices        # (要 sudo apt install v4l-utils)
+source scripts/rocm_env.sh
+uv pip install -e '.[yolo]'
+uv run --no-sync python -c 'import torch; assert torch.version.hip and torch.cuda.is_available(); print(torch.cuda.get_device_name(0))'
+./start_all.sh --no-browser
 ```
-
-`config.yaml` の `camera.preferred` は優先順位つきリストです。カメラ 1 台につき 1 エントリ (`by_id` glob か `vid_pid`) を並べると、接続中で最上位のカメラが選ばれます。どれも一致しなければ `fallback: any` で適当に選ばれます (`fallback: none` なら未登録カメラは使わない)。動作中のホットスワップにも対応: 使用中のカメラを抜くと次の登録カメラへ繋ぎ直し、より優先度の高いカメラを挿すと自動で乗り換えます (`preempt: false` で現在の映像を維持)。
-
-### ブラウザに映像が出ない / ステータスが `stream error` のまま
-
-`http://localhost:8080/stream.mjpg` を直接開いて 200 で MJPEG が降ってくるかを確認してください。
-
-- 200 + 黒画面 → `capture-run` がまだ SEARCHING の可能性。`tmux attach -t llava` で window 0 (capture) を見て、`-> CAPTURING dev=...` と `30 fps` が出ているか確認。出ていなければ `/dev/v4l/by-id/` の symlink と `config.yaml` の `camera.preferred[].by_id` が一致しているか見る
-- 404 / 500 → serve window のログを確認 (`tmux attach -t llava` → Ctrl-b 1)
-- LAN 別端末から繋がらない場合は `sudo ufw allow 8080` でファイアウォール開放
-
-### caption が空のまま (`(no caption yet)`)
-
-llama-server がまだモデルロード中 (~10 秒) か、`--reasoning off` を付け忘れたか。`tmux attach -t llava` → Ctrl-b 1 で `serve` window のログを確認:
-
-```
-vlm-runner: caption (1300ms) 'これは...'         ← OK
-vlm-runner: empty caption after strip; raw='<think>...'  ← --reasoning off 不足
-```
-
-### `start_all.sh` が「session already exists」で失敗
-
-```bash
-./stop_all.sh                  # まず停止
-./start_all.sh                 # 再起動
-```
-
-または `tmux kill-session -t llava` で強制終了。
-
-### モデルロードが極端に遅い (初回 30 秒以上)
-
-21 GB の GGUF を NVMe から SSD にコピー → ページキャッシュに乗せる時間。2 回目以降は ~10 秒に短縮されます。
-
-### YOLO の fp16 を fp32 に戻したい
-
-`config.yaml` の `yolo.half: true` を `false` に。fp32 のほうが精度はわずかに上がるが、Step 5 の同居測定で fp16 のほうが VLM 側の余裕が大きくなったので fp16 を採用しています。
-
----
-
-## 開発時のセルフチェック
-
-```bash
-# 全 Python ファイルの構文チェック
-python3 -m compileall -q src scripts && echo OK
-
-# モジュール import 確認 (依存解決の確認も兼ねる)
-uv run python -c "from src.server.app import app; print('imports OK')"
-```
-
----
-
-## NPU バックエンド（YOLO11m を XDNA2 NPU で実行）
-
-YOLO11m の物体検出を、従来の **Ultralytics YOLO(GPU/ROCm, `yolo11m.pt`)** から
-**NPU 実行(VitisAI EP, `yolo11m_a16w8.onnx`)** に載せ替えられます。VLM(Nemotron)・カメラ・MJPEG 配信は無改修。
-サイドカー方式（VLM の llama-server と同じ別プロセス+ローカルHTTP）で実装されており、`config.yaml` の
-`yolo.backend` を `npu`/`gpu` で切替でき、GPU 経路へのロールバックは一行です。
-アーキテクチャ・設計背景・実機検証の詳細は [`TECHNICAL.md`](./TECHNICAL.md) を参照。
-
-### 成果サマリ（何が動くようになったか）
-
-| 項目 | 結果 |
-|---|---|
-| NPU で YOLO11m 検出 | ✅ bus.jpg で **person×4 + bus×1**（信頼度 0.89/0.89/0.89/0.75, bus 0.87）= yolotest の A16W8 と一致 |
-| NPU オフロード実証 | ✅ `xrt-smi` で **HW Context=Active・Columns[0-7]・Submissions 増加** |
-| 座標系（逆letterbox） | ✅ bbox は入力フレーム座標系（1280×720 相当）に正しく戻る。全ボックスがフレーム内 |
-| スループット | ✅ ウォームアップ後 ~28–29 inf/s（yolotest と同等。カメラ30fpsは最新フレーム処理で自然に間引き） |
-| バックエンド切替 | ✅ `config.yaml` `yolo.backend: npu|gpu`。npu 不調なら gpu に戻すだけ |
-| クライアント互換 | ✅ bbox JSON スキーマ・`/ws/bbox` は不変（ブラウザ側 canvas は無改修） |
-
-現在の NPU 設定は YOLO26n の INT16 入力・2出力 ONNX
-（`models/yolo26n-640-split-v3-a16w8-perchannel-int16.onnx`）を使用する。
-対応する同名 `.json` の量子化スケールも必要。上表の検出数・速度は以前の
-YOLO11m 実機測定値であり、YOLO26n の性能値ではない。
-
-### 使い方
-
-#### バックエンド切替（`config.yaml`）
-```yaml
-yolo:
-  backend: npu   # npu = XDNA2 NPU(VitisAI, 別プロセス) / gpu = Ultralytics(ROCm, serve内)
-```
-
-#### 起動・停止
-```bash
-./start_all.sh          # backend:npu なら npu-yolo ウィンドウも自動起動
-./stop_all.sh
-tmux attach -t llava    # Ctrl-b 0/1/2/3 = capture/serve/vlm/npu-yolo
-```
-起動順は不問（serve 側はサイドカーが立つまで HTTP retry する）。
-
-#### 検証（実機）
-```bash
-# サイドカー稼働中に別ターミナルで NPU オフロードを確認
-/opt/xilinx/xrt/bin/xrt-smi examine -d 0000:c6:00.1 -r all
-#  → HW Context=Active・Columns[0-7]・Submissions 増加 なら NPU 実行中
-```
-ブラウザ `http://localhost:8080/` を開き、人/物が bbox に正しく収まるか目視確認する。
-（判定基準は「`Test Finished`」ではなく「`xrt-smi` が Active」＋「ブラウザで正しい位置」）
-
-### 運用上の注意（実装で判明した点）
-
-- **初回コンパイル ~25秒、2回目以降 ~0.7秒**: VitisAI はセッション生成時に量子化モデルを
-  `AMD_AIE2P_4x8_CMC_Overlay` 向けにコンパイルする。Ryzen AI 1.8 はその結果をディスクに残さない
-  （1.7.1 の `cacheDir`/`cacheKey` provider option は 1.8 では無効）ため、サイドカー側で一度だけ
-  `models/yolo11m_a16w8_ctx.onnx`（EPContext モデル）にコンパイルして保存し、以降の起動で再利用する。
-  セッション生成が約25秒→約0.7秒になり、出力はビット一致・推論時間も約33ms/回で変わらない。
-  元モデル・onnxruntime・Ryzen AI のバージョンが変わると自動で再生成される
-  （スタンプ: `models/yolo11m_a16w8_ctx.json`。どちらも gitignore 済み）。`--no-ctx-cache` で無効化可。
-  サイドカーは**ウォームアップ完了後に `/latest` を出す**設計なので、serve 側は準備できるまで
-  自然に待つ（bbox 空→準備後に出始める）。
-- **venv 分離は厳守**: サイドカーは RAI venv(`source scripts/rai_env.sh`)、serve は uv venv。
-  `start_all.sh` はサイドカーのウィンドウにだけ RAI env を source し、ROCm 用 `ENV_PREFIX`
-  (`ROCM_PATH` / `HIP_VISIBLE_DEVICES`) は付けない（NPU には不要）。
-- **サイドカーの起動コマンド**: RAI venv の python で、`PYTHONPATH=<repo>` を通して起動する
-  （`src.capture.shm_writer` / `src.npu_yolo.postprocess` を import するため）。`uv run` ではない。
-  `start_all.sh` が自動でこの形にする。
-- **ロールバック**: NPU が不調なら `config.yaml` の `yolo.backend: gpu` に戻すだけ。サイドカーは
-  起動されず、従来の ultralytics/GPU 経路が serve プロセス内で動く。
-
-### 実行時に必要なもの（`~/yolotest` フォルダは不要）
-
-- Ryzen AI 環境は `scripts/rai_env.sh` が 1.9、1.8、1.7.1 の順に探索します。1.9 の既定パスは `~/ryzenai_1_9/venv`（変更は `RAI19_VENV`）です。NPU 出力同期は yolodemo の検証済み Ryzen AI 1.9 / XRT 2.26.89 と 1.8 / XRT 2.25.37 のライブラリハッシュに対応し、未検証の組み合わせでは起動を停止します。1.7.1 は同期の検証対象外です。同期ライブラリの初回ビルドに `g++` と XRT ヘッダーが必要です。EPContext キャッシュはランタイムのハッシュを含めて再生成します。
-- 同期コードは [yolodemo](https://github.com/kotetsuy/yolodemo) から移植した AGPL-3.0-only のコードです。詳細は `src/npu_yolo/` 内の SPDX 表記と `licenses/AGPL-3.0.txt` を参照してください。
-- `models/yolo11m_a16w8.onnx`（コピー済み）— 1.7.1 で作ったモデルは 1.8 でもそのまま読めて動く。
-  **アップグレード後の再量子化は不要**。
-- LLaVA の uv venv（npu 経路は `requests`=webrtc extra を使用）
-
-`~/yolotest` は**再量子化する時のみ**必要（下記）。通常運用では参照しない。モデルも前後処理コードも
-リポジトリ内に取り込み済みで、LLaVA-NPU 単体で自己完結する。
-
-#### 再量子化が要るとき（通常不要）
-A16W8 を作り直したい場合のみ:
-```bash
-source ~/LLaVA-NPU/scripts/rai_env.sh
-python ~/yolotest/quantize_yolo11m_a16w8.py --input ~/yolo/yolo11m.onnx \
-    --output ~/LLaVA-NPU/models/yolo11m_a16w8.onnx --calib-dir ~/yolotest/calib2
-```
-
----
-
-## NPU 復旧・運用メモ（環境アップグレード後）
-
-Ubuntu を **26.04** へ、ROCm を **7.14** へアップグレードした直後、NPU(`amdxdna`) が動作しなくなった
-ことがある。3つの独立した問題を切り分けて解消し、一般ユーザ権限で `xrt-smi examine` が
-**NPU Strix Halo（Firmware 1.1.2.65）** を認識する状態まで復旧した（根本原因と対処コマンドは
-[`TECHNICAL.md`](./TECHNICAL.md) の「NPU recovery」節を参照）。
-
-### 最終検証（再起動後、一般ユーザ で）— ✅ 全て合格
-
-```bash
-ulimit -l                                              # → unlimited                     ✅
-ls -l /dev/accel/accel0                                # crw-rw-rw-+ root render 261,0    ✅
-source /opt/xilinx/xrt/setup.sh && xrt-smi examine     # [0000:c6:00.1] NPU Strix Halo    ✅
-```
-
-3点すべて `sudo` なしで通れば、YOLO11m の NPU パイプライン（`start_all.sh` /
-`scripts/npu_yolo_sidecar.py`）を一般ユーザ権限で実行できる。
-
----
 
 ## ライセンス
 
-[`LICENSE`](./LICENSE) を参照。
+[LICENSE](LICENSE)を参照してください。NPU出力同期コードは [yolodemo](https://github.com/kotetsuy/yolodemo) 由来でAGPL-3.0-onlyです。ソースのSPDX表記と[AGPL-3.0本文](licenses/AGPL-3.0.txt)を参照してください。
