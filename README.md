@@ -155,4 +155,4 @@ uv run --no-sync python -c 'import torch; assert torch.version.hip and torch.cud
 
 ## License
 
-See [LICENSE](LICENSE). The NPU output synchronization code is adapted from [yolodemo](https://github.com/kotetsuy/yolodemo) under AGPL-3.0-only. See the source SPDX headers and [AGPL-3.0 text](licenses/AGPL-3.0.txt).
+This project is licensed under the [GNU Affero General Public License v3.0 only (AGPL-3.0-only)](LICENSE). The NPU output synchronization code is adapted from [yolodemo](https://github.com/kotetsuy/yolodemo) under AGPL-3.0-only. See the source SPDX headers and [AGPL-3.0 text](licenses/AGPL-3.0.txt).

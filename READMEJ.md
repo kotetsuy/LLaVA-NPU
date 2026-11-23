@@ -155,4 +155,4 @@ uv run --no-sync python -c 'import torch; assert torch.version.hip and torch.cud
 
 ## ライセンス
 
-[LICENSE](LICENSE)を参照してください。NPU出力同期コードは [yolodemo](https://github.com/kotetsuy/yolodemo) 由来でAGPL-3.0-onlyです。ソースのSPDX表記と[AGPL-3.0本文](licenses/AGPL-3.0.txt)を参照してください。
+このプロジェクトは [GNU Affero General Public License v3.0 only（AGPL-3.0-only）](LICENSE) で公開されています。NPU出力同期コードは [yolodemo](https://github.com/kotetsuy/yolodemo) 由来でAGPL-3.0-onlyです。ソースのSPDX表記と[AGPL-3.0本文](licenses/AGPL-3.0.txt)を参照してください。
