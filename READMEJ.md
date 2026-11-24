@@ -387,7 +387,7 @@ source /opt/xilinx/xrt/setup.sh && xrt-smi examine     # [0000:c6:00.1] NPU Stri
 
 ### Qwen3-VL-4B-Instruct による動画フレーム解析
 
-このブランチは `~/qwen3` の Q4_K_M GGUF と F16 mmproj、および `~/nemotron-3-5-supervl` の llama.cpp HIP ビルドを使用します。`scripts/rocm_env.sh` は既定で ROCm 10.1 (`/opt/rocm/core-10.1`) を選択します。別の場所にある場合は `ROCM_PATH` を指定してください。
+このブランチは `~/qwen3` の Q4_K_M GGUF と F16 mmproj、および `.cache/llama-rocm10.2-build` の llama.cpp HIP ビルドを使用します。`scripts/rocm_env.sh` は既定で ROCm 10.2 (`/opt/rocm/core-10.2`) を選択します。別の場所にある場合は `ROCM_PATH` を指定してください。
 
 `./start_all.sh --no-browser` で起動します。カメラ、またはカメラがない場合の `camera.playlist` の動画から、既定では1秒間隔で2フレームを取り、時間順にまとめて VLM に送信します。解析後に `cadence_sec` 秒待って次のフレームを収集します。フレーム数と間隔、HTTP タイムアウトは `vlm.server` で変更できます。動画全体を一度に入力する方式ではなく、短い区間を繰り返し解析します。推論時間やメモリ消費は画像数に依存します。
 

@@ -68,7 +68,7 @@ server:
 vlm:
   # Qwen3-VL-4B-Instruct (Q4_K_M)
   # Step 4 (subprocess) の互換用にバイナリ・モデルパスは残す
-  binary: ~/nemotron-3-5-supervl/build-hip/bin/llama-mtmd-cli
+  binary: ~/LLaVA-NPU/.cache/llama-rocm10.2-build/bin/llama-mtmd-cli
   model: ~/qwen3/Qwen3VL-4B-Instruct-Q4_K_M.gguf
   mmproj: ~/qwen3/mmproj-Qwen3VL-4B-Instruct-F16.gguf
   # 出力言語を強制するため system / user の二段構え。

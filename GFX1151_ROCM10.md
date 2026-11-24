@@ -48,7 +48,7 @@ cmake --build "$HOME/llama.cpp/build" --config Release -j 4 \
 
 `scripts/rocm_env.sh` は古い `HSA_OVERRIDE_GFX_VERSION` を解除し、ROCmの
 実行・ライブラリ検索パスを設定する。起動スクリプトも同じ環境を使用する。
-ROCm製品版は `/opt/rocm/core-10.0/.info/version` で確認する。
+ROCm製品版は `/opt/rocm/core-10.2/.info/version` で確認する。
 HIPのバージョン番号が7.xでも、ROCm製品版とは別なので異常とは限らない。
 
 ## 起動・確認・停止
